@@ -1,6 +1,6 @@
 param (
     [string]$subscriptionId,
-    [string]$resourceGroup
+    [string]$resourceGroup,
     [string]$dcrName,
     [string]$dceName,
     [string]$vmName,
