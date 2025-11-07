@@ -15,7 +15,8 @@ SECRET_FILE=""
 if [[ $WWW_AUTH_HEADER =~ Basic\ realm=([^\ ]+) ]]; then
     # get rid of '$\r' at end of line
     SECRET_FILE=$(echo ${BASH_REMATCH[1]} | sed 's/[$\r]*$//')
-    echo "Secret file path: $SECRET_FILE"
+    # if this utility is successful then it returns only the ACCESS_TOKEN
+    #echo "Secret file path: $SECRET_FILE"
 else
     echo "Failed to extract secret file path from WWW-Authenticate header."
     exit 1
