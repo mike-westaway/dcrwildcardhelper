@@ -1,13 +1,17 @@
 param (
     [string]$subscriptionId,
     [string]$resourceGroup,
+    [string]$location,
     [string]$dcrName,
     [string]$dceName,
     [string]$vmName,
     [string]$vmResourceGroup,
-    [string]$customLogPath
+    [string]$customLogPath,
+    [string]$workspaceName,
+    [string]$tableName
     )
 
+# eg location = "uksouth"
 # eg $dcrName = "WaAgentDcr"
 # eg $dceName = "arc-servers-uks-endpoint"
 $dceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Insights/dataCollectionEndpoints/$dceName"
@@ -16,6 +20,8 @@ $kind = "Linux"
 # eg $vmName = "jumpbox-linux"
 # eg $vmResourceGroup = "jumpbox-linux-uks"
 $vmResourceId = "/subscriptions/$subscriptionId/resourceGroups/$vmResourceGroup/providers/Microsoft.Compute/virtualMachines/$vmName"
+
+$workspaceResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.OperationalInsights/workspaces/$workspaceName"
 
 # eg $customLogPath = "/var/log/waagent*.log" # Path to the custom log file
 $dataSourceName = "Custom-Text-$tableName"
@@ -27,24 +33,24 @@ $dcrPayload = @{
     location = $location
     kind = $kind
     properties = @{
-            dataCollectionEndpointId = "$dceId"
-            streamDeclarations = @{
-                "Custom-Text-$tableName" = @{
-                    columns = @(
-                        @{ "name" = "TimeGenerated"; "type" = "datetime" }
-                        @{ "name" = "RawData"; "type" = "string" }
-                        @{ "name" = "FilePath"; "type" = "string" }
-                        @{ "name" = "Computer" ; "type" = "string" }
+        dataCollectionEndpointId = "$dceId"
+        streamDeclarations = @{
+            "Custom-Text-$tableName" = @{
+                columns = @(
+                    @{ "name" = "TimeGenerated"; "type" = "datetime" }
+                    @{ "name" = "RawData"; "type" = "string" }
+                    @{ "name" = "FilePath"; "type" = "string" }
+                    @{ "name" = "Computer" ; "type" = "string" }
                 )
             }
         }
-            dataSources = @{
-            fileLogs = @(
+        dataSources = @{
+            logFiles = @(
                 @{
                     streams = @("Custom-Text-$tableName")
                     filePatterns = @($customLogPath)
                     format = "text"
-                    settings = @{ "text" = @{ "recordStartTimestampFormat" = "ISO 8601" } }
+                    #settings = @{ "text" = @{ "recordStartTimestampFormat" = "ISO 8601" } }
                     name = "Custom-Text-$tableName"
                 }
             )
@@ -61,7 +67,7 @@ $dcrPayload = @{
             @{
                 streams = @("Custom-Text-$tableName")
                 destinations = @($dcrName)
-                transformKql = "source |  extend Text = RawData, Computer = Computer, FilePath = FilePath"
+                transformKql = "source |  extend Text = RawData, Computer = Computer, FilePath = FilePath, TimeGenerated = TimeGenerated"
                 outputStream = "Custom-$tableName"
             }
         )
@@ -69,33 +75,39 @@ $dcrPayload = @{
 }
 
 # Deploy DCR
-New-AzDataCollectionRule `
-	-Name "$dcrName" `
-	-ResourceGroupName "$resourceGroup" `
-	-JsonString $($dcrPayload | ConvertTo-Json -depth 10)
+$payload = $dcrPayload | ConvertTo-Json -depth 10
+
+try {
+    New-AzDataCollectionRule `
+	-Name $dcrName `
+	-ResourceGroupName $resourceGroup `
+	-JsonString $payload
+} catch {
+    Write-Error "Failed to create DCR: $_"
+}
 
 #
 # For Some reason the Data Source is not being added, so add it as an additional step
 #
 
 # Get the existing Data Collection Rule
-$dcr = Get-AzDataCollectionRule -ResourceGroupName $resourceGroup -Name $dcrName
+###$dcr = Get-AzDataCollectionRule -ResourceGroupName $resourceGroup -Name $dcrName
 
 # Create a new custom log data source
-$dcrDataSource = New-AzLogFilesDataSourceObject `
-                    -Name $dataSourceName  `
-                    -FilePattern $customLogPath `
-                    -Stream $incomingStream
+###$dcrDataSource = New-AzLogFilesDataSourceObject `
+###                    -Name $dataSourceName  `
+###                    -FilePattern $customLogPath `
+###                    -Stream $incomingStream
 
 # Add the new data source to the DCR
-Update-AzDataCollectionRule `
-                -Name $dcr.Name `
-                -ResourceGroupName $dcr.ResourceGroupName `
-                -SubscriptionId $subscriptionId `
-                -DataSourceLogFile  $dcrDataSource
+###Update-AzDataCollectionRule `
+###                -Name $dcr.Name `
+###                -ResourceGroupName $dcr.ResourceGroupName `
+###                -SubscriptionId $subscriptionId `
+###                -DataSourceLogFile  $dcrDataSource
 
 # Associate with the VM source
-New-AzDataCollectionRuleAssociation `
-                -AssociationName $dataSourceName `
-                -ResourceUri $vmResourceId `
-                -DataCollectionRuleId $dcr.Id
+###New-AzDataCollectionRuleAssociation `
+###                -AssociationName $dataSourceName `
+###                -ResourceUri $vmResourceId `
+###                -DataCollectionRuleId $dcr.Id
