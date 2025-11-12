@@ -1,6 +1,7 @@
 #!/bin/bash
 log_file=$1 # eg "/var/log/waagent.log"
 output_prefix=$2 # eg "waagent_log"
+maximum_timestamp=$3 # eg "2024-06-15T12:00:00Z"
 
 max_size=$((1024 * 1024)) # 1 MB in bytes
 
@@ -17,8 +18,17 @@ current_size=$(stat -c%s "$current_file")
 while IFS= read -r line; do
     timestamp=$(echo "$line" | awk '{print $1}')
 
+    # Convert to epoch seconds
+    epoch_timestamp=$(date -d "$timestamp" +%s)
+    epoch_maximum=$(date -d "$maximum_timestamp" +%s)
+
     # Skip lines that don't match today's date
     if [[ "$timestamp" != "$today"* ]]; then
+        continue
+    fi
+
+    # Skip lines with timestamp greater than or equal to maximum_timestamp
+    if [[ $epoch_timestamp -ge $epoch_maximum ]]; then
         continue
     fi
 
