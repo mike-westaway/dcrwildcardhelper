@@ -1,6 +1,10 @@
 #!/bin/bash
 
 ###
+# save this to the configured Storage Account
+###
+
+###
 # from getEarliestTimestamp.sh
 ###
 
@@ -16,6 +20,7 @@ function getEarliestTimestamp() {
     local TIMESTAMP_COLUMN=$5 # eg "TimeGenerated"
     local TIMESPAN=$6 # "P1D" # last 1 day
     local LOGFILE=$7 # eg "./getEarliestTimestamp.log"
+    local IS_ARC_CONNECTED_MACHINE=$8 # "true" or "false"
 
     KQL="$TABLE | where Computer == '$COMPUTER' | where FilePath == '$FILEPATH' | summarize EarliestTimestamp=min($TIMESTAMP_COLUMN)"
 
@@ -23,7 +28,11 @@ function getEarliestTimestamp() {
     PAYLOAD=$(printf '{ "query": "%s", "timespan": "%s" }' "$KQL" "$TIMESPAN")
 
     # Get the Entra access token
-    ACCESS_TOKEN=$($getAccessToken $RESOURCE)
+    if ($IS_ARC_CONNECTED_MACHINE == "true") ; then
+        ACCESS_TOKEN=$(getAccessTokenArc $RESOURCE)
+    else
+        ACCESS_TOKEN=$(getAccessTokenAzure $RESOURCE)
+    fi
 
     KQL_RESULT=$(curl -X POST "$RESOURCE/v1/workspaces/$WORKSPACE_ID/query" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -124,7 +133,7 @@ function log2json() {
 ###
 # from getAccessToken.sh
 ###
-function getAccessToken() {
+function getAccessTokenArc() {
     local RESOURCE=$1 # eg "https://storage.azure.com/"
     # Config
     # This is the IMDS endpoint used by the System Managed Identity to get tokens
@@ -158,6 +167,29 @@ function getAccessToken() {
 
     # Step 4: Make authenticated request with Basic token
     RESPONSE=$(curl -s -H "Metadata: true" -H "Authorization: Basic $SECRET" "$ENDPOINT")
+
+    # Step 5: Extract access token
+    ACCESS_TOKEN=$(echo "$RESPONSE" | grep -oP '"access_token"\s*:\s*"\K[^"]+')
+
+    if [[ -n "$ACCESS_TOKEN" ]]; then
+        echo "$ACCESS_TOKEN"
+    else
+        echo "Failed to retrieve access token."
+        echo "Response: $RESPONSE"
+        exit 1
+    fi
+}
+
+function getAccessTokenAzure() {
+    local RESOURCE=$1 # eg "https://storage.azure.com/"
+    # Config
+    # This is the IMDS endpoint used by the System Managed Identity to get tokens
+    API_VERSION="2020-06-01"
+    IDENTITY_ENDPOINT="${IDENTITY_ENDPOINT:-http://169.254.169.254/metadata/identity/oauth2/token}"
+    ENDPOINT="${IDENTITY_ENDPOINT}?resource=${RESOURCE}&api-version=${API_VERSION}"
+
+    # Step 4: Make authenticated request with Basic token
+    RESPONSE=$(curl -s -H "Metadata: true" "$ENDPOINT")
 
     # Step 5: Extract access token
     ACCESS_TOKEN=$(echo "$RESPONSE" | grep -oP '"access_token"\s*:\s*"\K[^"]+')
@@ -210,6 +242,7 @@ dcrImmutableId=$5
 endpointUri=$6
 timestampColumn=$7
 timeSpan=$8
+isArcConnectedMachine=$9
 
 script_name=$(basename "$0")                # Get current script name
 logFilePath="${script_name%.*}.log" 
@@ -221,7 +254,7 @@ echo "Script $script_name started. Params: workspaceId=$workspaceId, computerNam
 while true; do
     echo "Attempt #$((attempts + 1)) to get earliest timestamp..."
     
-    timestamp=$(getEarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $logFilePath)
+    timestamp=$(getEarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $logFilePath $isArcConnectedMachine)
 
     if [[ -n "$timestamp" ]]; then
         echo "Got result: $timestamp"
