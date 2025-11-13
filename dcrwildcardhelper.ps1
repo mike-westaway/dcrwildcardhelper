@@ -53,7 +53,7 @@ $azureWindowsVMs = ,@(
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
 $azureLinuxVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "jumpbox-linux-uks", "jumpbox-linux", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs_CL")    
+    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "jumpbox-linux-uks", "jumpbox-linux", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")    
 )
 
 # TODO make this a parameter
@@ -515,13 +515,13 @@ foreach ($vm in $azureLinuxVMs) {
                     -SubscriptionId $dcr.SubscriptionId `
                     -DataSourceLogFile  $dcrDataSource
                 
-                # create the DCR Association
-                # TODO this may already exist - so ignore that error
-                New-AzDataCollectionRuleAssociation `
-                -AssociationName $dcr.Properties.dataSources.logFiles.name `
-                -ResourceUri $vmResourceId `
-                -DataCollectionRuleId $dcr.ResourceId
             }
+            # create the DCR Association
+            # TODO this may already exist - so ignore that error
+            New-AzDataCollectionRuleAssociation `
+            -AssociationName $dcr.Properties.dataSources.logFiles.name `
+            -ResourceUri $vmResourceId `
+            -DataCollectionRuleId $dcr.ResourceId
 
             # lookup the workspace immutable id based on the name and resourcegroup
             $workspace = Get-AzOperationalInsightsWorkspace -ResourceGroupName $dcrResourceGroup -Name $workspaceName

@@ -211,9 +211,16 @@ function ingestJson() {
     local TABLE_NAME=$2 # eg "WaAgent3_CL"
     local ENDPOINT_URI=$3 # eg "https://my-endpoint.uksouth-1.ingest.monitor.azure.com" 
     local JSON_LOG_FILE=$4 # eg "waagent_log_1.json"
+    local isArcConnectedMachine=$5 # "true" or "false"
 
     RESOURCE="https://monitor.azure.com"
-    TOKEN=$(getAccessToken $RESOURCE)
+
+    # Get the Entra access token
+    if ($IS_ARC_CONNECTED_MACHINE == "true") ; then
+        TOKEN=$(getAccessTokenArc $RESOURCE)
+    else
+        TOKEN=$(getAccessTokenAzure $RESOURCE)
+    fi
 
     #name of the stream in the DCR that represents the destination table
     STREAM_NAME="Custom-Text-$TABLE_NAME" 
@@ -279,5 +286,5 @@ jsonFileArr=($(log2json $sourceLogFile $targetTable $timestamp))
 echo "Ingesting logs into Log Analytics Workspace table..."
 for jsonLogFile in "${jsonFileArr[@]}"; do
     echo "Ingesting file: $jsonLogFile"
-    ingestJson $dcrImmutableId $targetTable $endpointUri $jsonLogFile
+    ingestJson $dcrImmutableId $targetTable $endpointUri $jsonLogFile $isArcConnectedMachine
 done
