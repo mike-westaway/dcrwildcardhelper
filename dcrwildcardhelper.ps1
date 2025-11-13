@@ -279,7 +279,7 @@ blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`
 curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
 chmod +x "`$local_file"
 sed -i 's/\r$//' "./`$local_file"
-"./`$local_file" $workspaceId $computer_name $source_log_file $target_table $dcr_immutable_id $endpoint_uri $timestamp_column $time_span > "`${local_file%.sh}.log" 2>&1
+"./`$local_file" `$workspaceId `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span > "`${local_file%.sh}.log" 2>&1
 echo "Part III Upload log file"
 log_blob_name="`${blob_name%.sh}.log"
 log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
@@ -312,7 +312,7 @@ blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`
 curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
 chmod +x "`$local_file"
 sed -i 's/\r$//' "./`$local_file"
-"./`$local_file" $workspace_id $computer_name $source_log_file $target_table $dcr_immutable_id $endpoint_uri $timestamp_column $time_span > "`${local_file%.sh}.log" 2>&1
+"./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span > "`${local_file%.sh}.log" 2>&1
 echo "Part III Upload log file"
 log_blob_name="`${blob_name%.sh}.log"
 log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
@@ -459,76 +459,76 @@ foreach ($vm in $azureLinuxVMs) {
             -ErrorAction SilentlyContinue
 
             if ($null -eq $dcr) {
-            Write-Host "DCR $dcrName does not exist - creating it" -ForegroundColor Yellow
-            # create the DCR if it does not exist
-            New-DcrFromWildcard `
-                -dcrName $dcrName `
-                -dcrResourceGroupName $dcrResourceGroup `
-                -dcrSubscriptionId $subscriptionId `
-                -dcrLocation $dcrLocation `
-                -dceName $dceName `
-                -customLogPath $firstMatch.Path `
-                -tableName $tableName `
-                -workspaceName $workspaceName
+                Write-Host "DCR $dcrName does not exist - creating it" -ForegroundColor Yellow
+                # create the DCR if it does not exist
+                New-DcrFromWildcard `
+                    -dcrName $dcrName `
+                    -dcrResourceGroupName $dcrResourceGroup `
+                    -dcrSubscriptionId $subscriptionId `
+                    -dcrLocation $dcrLocation `
+                    -dceName $dceName `
+                    -customLogPath $firstMatch.Path `
+                    -tableName $tableName `
+                    -workspaceName $workspaceName
 
-            # re-fetch the DCR now it exists
-            $dcr = Get-AzResource -ResourceGroupName $dcrResourceGroup -ResourceType "microsoft.insights/datacollectionrules" -Name $dcrName
+                # re-fetch the DCR now it exists
+                $dcr = Get-AzResource -ResourceGroupName $dcrResourceGroup -ResourceType "microsoft.insights/datacollectionrules" -Name $dcrName
             }
             else {
-            # create the new Data Source
-            $incomingStream = "Custom-Stream"                 # incoming stream name
-            $dataSourceName = $firstMatch.dcrName + "-logfile"   # friendly name for this data source
+                # create the new Data Source
+                $incomingStream = "Custom-Stream"                 # incoming stream name
+                $dataSourceName = $firstMatch.dcrName + "-logfile"   # friendly name for this data source
 
-            # if there are wildcards in the pattern then append the file part
-            # else the pattern is a folder only
-            if ($firstMatch.Path -match '[\*\?\[\.]') {
-                $filePattern = $folder + $firstMatch.Path.Substring($firstMatch.Path.LastIndexOf('/'))           # array of file patterns
-            }
-            else {
-                $filePattern = $folder
-            }
+                # if there are wildcards in the pattern then append the file part
+                # else the pattern is a folder only
+                if ($firstMatch.Path -match '[\*\?\[\.]') {
+                    $filePattern = $folder + $firstMatch.Path.Substring($firstMatch.Path.LastIndexOf('/'))           # array of file patterns
+                }
+                else {
+                    $filePattern = $folder
+                }
 
-            # TODO cannot have more than one Data Source object of a given type (eg Log File)
-            # So in this case need to add an extra File Pattern to an exisiting data source object
-            if ($null -ne $dcr.Properties.dataSources.logFiles) {
-                # the Log Files data source already exists - recreate the object appending the new file pattern
-                $exisitingDataSourceLogFiles = $dcr.Properties.dataSources.logFiles[0]
+                # Cannot have more than one Data Source object of a given type (eg Log File)
+                # So in this case need to add an extra File Pattern to an exisiting data source object
+                if ($null -ne $dcr.Properties.dataSources.logFiles) {
+                    # the Log Files data source already exists - recreate the object appending the new file pattern
+                    $exisitingDataSourceLogFiles = $dcr.Properties.dataSources.logFiles[0]
 
-                $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($filePattern)
+                    $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($filePattern)
 
-                $dcrDataSource = New-AzLogFilesDataSourceObject `
-                -Name $exisitingDataSourceLogFiles.name  `
-                -FilePattern $newFilePatterns `
-                -Stream $exisitingDataSourceLogFiles.streams[0]
-            }
-            else {
-                $dcrDataSource = New-AzLogFilesDataSourceObject `
-                -Name $dataSourceName  `
-                -FilePattern $filePattern `
-                -Stream $incomingStream
-            }
+                    $dcrDataSource = New-AzLogFilesDataSourceObject `
+                    -Name $exisitingDataSourceLogFiles.name  `
+                    -FilePattern $newFilePatterns `
+                    -Stream $exisitingDataSourceLogFiles.streams[0]
+                }
+                else {
+                    $dcrDataSource = New-AzLogFilesDataSourceObject `
+                    -Name $dataSourceName  `
+                    -FilePattern $filePattern `
+                    -Stream $incomingStream
+                }
 
-            # attach this to the exisiting DCR
-            Update-AzDataCollectionRule `
-                -Name $dcr.Name `
-                -ResourceGroupName $dcr.ResourceGroupName `
-                -SubscriptionId $dcr.SubscriptionId `
-                -DataSourceLogFile  $dcrDataSource
+                # attach this to the exisiting DCR
+                Update-AzDataCollectionRule `
+                    -Name $dcr.Name `
+                    -ResourceGroupName $dcr.ResourceGroupName `
+                    -SubscriptionId $dcr.SubscriptionId `
+                    -DataSourceLogFile  $dcrDataSource
+                
+                # create the DCR Association
+                # TODO this may already exist - so ignore that error
+                New-AzDataCollectionRuleAssociation `
+                -AssociationName $dcr.Properties.dataSources.logFiles.name `
+                -ResourceUri $vmResourceId `
+                -DataCollectionRuleId $dcr.ResourceId
             }
-            
-            # create the DCR Association
-            # TODO this may already exist - so ignore that error
-            New-AzDataCollectionRuleAssociation `
-            -AssociationName $dcr.Properties.dataSources.logFiles.name `
-            -ResourceUri $vmResourceId `
-            -DataCollectionRuleId $dcr.ResourceId
 
             # lookup the workspace immutable id based on the name and resourcegroup
             $workspace = Get-AzOperationalInsightsWorkspace -ResourceGroupName $dcrResourceGroup -Name $workspaceName
             $workspaceId = $workspace.CustomerId
 
             # lookup the DCE endpoint
-            $dce = Get-AzResource -ResourceId $dceId
+            $dce = Get-AzResource -ResourceId $dcr.Properties.dataCollectionEndpointId
 
             # at this point we have the DCR, Data Source, Folder Path and Association created
             # the detection of the new log file and the creation of the DCR plus time to first ingestion
