@@ -158,7 +158,7 @@ function New-DcrDataSourceAndAssociation {
             -tableName $tableName `
             -workspaceName $workspaceName
 
-        $retDcrResource = Get-AzResource -ResourceId $dcr.Id -ErrorAction SilentlyContinue
+        $retDcrResource = Get-AzResource -ResourceId $dcr.Id
     }
     else {
         # create the new Data Source
@@ -390,8 +390,8 @@ if [[ `$WWW_AUTH_HEADER =~ Basic\ realm=([^\ ]+) ]]; then SECRET_FILE=`$(echo `$
 if [[ ! -f "`$SECRET_FILE" ]]; then echo "Error 2" && exit 1; fi
 SECRET=`$(cat "`$SECRET_FILE")
 RESPONSE=`$(curl -s -H "Metadata: true" -H "Authorization: Basic `$SECRET" "`$ENDPOINT")
-ACCESS_TOKEN=`$(echo "`$RESPONSE" | grep -oP '"access_token"\s*:\s*"\K[^"]+')
-if [[ -n "`$ACCESS_TOKEN" ]]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
+ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
 echo "Part II Download script"
 storage_account=$scriptStorageAccount
 container_name=$scriptContainerName
@@ -423,8 +423,8 @@ RESOURCE="https://storage.azure.com/"
 IDENTITY_ENDPOINT="http://$imdsHostVM/metadata/identity/oauth2/token"
 ENDPOINT="`${IDENTITY_ENDPOINT}?resource=`${RESOURCE}&api-version=`${API_VERSION}"
 RESPONSE=`$(curl -s -H "Metadata: true" "`$ENDPOINT")
-ACCESS_TOKEN=`$(echo "`$RESPONSE" | grep -oP '"access_token"\s*:\s*"\K[^"]+')
-if [[ -n "`$ACCESS_TOKEN" ]]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
+ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
 echo "Part II Download script"
 storage_account=$scriptStorageAccount
 container_name=$scriptContainerName
