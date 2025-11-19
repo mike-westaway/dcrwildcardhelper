@@ -1,16 +1,30 @@
 # Enable strict mode to enforce variable declaration
 Set-StrictMode -Version Latest
 
+# In testing mode speed things up by not calling run-command first time
+$IsTestingMode = $true
+
 # Define the Linux paths
-$linuxPaths = @(
-    "/home/*/.bash_history",
-    "/etc",
-    "/var/log"
+#$linuxPaths = @(
+#    "/home/*/.bash_history",
+#    "/etc",
+#    "/var/log/waagent*.log"
+#)
+
+# these are the RegEx equivalents of the original Splunk wildcards
+# Splunk wildcards are proprietary as are DCR wildcards
+# for example Splunk '/var/.../*.log' becomes '/var/.*/[^/]+.log' in RegEx and '/var/myparentfolder/myfolder*/*.log in DCR (multiple potentially required) 
+# for example Splunk '/var/*/*.log' becomes '/var/[^/]+/[^/]+.log' in RegEx and '/var/myfolder*/*.log' in DCR (multiple potentially required)
+$linuxSplunkWildcardPatterns = @(
+    "/var/log/waagent*.log"
 )
 
 # Define the Windows paths
 $windowsPaths = @(
 )
+
+# test using linux wildcards
+$splunkWildcardPaths = $linuxSplunkWildcardPatterns
 
 # location for the DCRs
 $dcrLocation = "uksouth"
@@ -18,28 +32,6 @@ $dcrLocation = "uksouth"
 $scriptStorageAccount = "arcserversukssa"
 # container name for scripts and script logs
 $scriptContainerName = "scripts"
-
-#Build array of objects with classification
-# These types will be used as the names of exisiting Data Collection Rules (DCRs)
-$categorisedWildcards = foreach ($p in $linuxPaths) {
-    $dcrName = if ($p -like "*/oracle/*") {
-        "Oracle"
-    } elseif ($p -like "*/sap/*") {
-        "Sap"
-    } elseif ($p -like "*.bash_history*") {
-        "BashHistory"
-    } else {
-        "LinuxTextLogs"
-    }
-
-    [PSCustomObject]@{
-        Path = $p
-        DcrName = $dcrName
-    }
-}
-
-#Display result
-$categorisedWildcards | Format-Table -AutoSize
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
 $onmpremLinuxVMs = ,@(
@@ -59,6 +51,20 @@ $azureLinuxVMs = ,@(
 # TODO make this a parameter
 $dcrResourceGroup = "arc-servers-uks"
 
+function Convert-SplunkWildcardToRegex {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Pattern
+    )
+
+    # Replace escaped Splunk wildcards with regex equivalents
+    $regexPattern = $Pattern -replace '\.\.\.', '.*'      # '...' → '.*'
+    $regexPattern = $regexPattern -replace '\*', '[^/]+'      # '*' → '[^/]+'
+
+    # Return the final regex pattern
+    return $regexPattern
+}
+
 # Make a name from a wildcard path by stripping out any wildcard characters
 # and prepending dcr_ to the name
 function Get-DcrNameFromWildcard {
@@ -66,12 +72,140 @@ function Get-DcrNameFromWildcard {
         [string]$WildcardPathname
     )
 
-    $dcrName = $WildcardPathname -replace '[\*\?\[\]/]', '_'
+    $dcrName = $WildcardPathname -replace '[\*\?\[\]\^\./]', '_'
     $dcrName = "dcr_" + $dcrName
     return $dcrName
 }
 
-# Create a DCR based on a name
+# Get the DCR Folder Path for a given VM Resource Id and Folder
+function Get-DcrFolderPath {
+    param (
+        [string]$VmResourceId,
+        [string]$Folder
+    )
+
+    $retDcrFolderPath = $null
+
+    # Is there a DCR Association for this VM
+    $dcrAssociationArr = @(Get-AzDataCollectionRuleAssociation -ResourceUri $VmResourceId)
+
+    foreach ($dcrAssociation in $dcrAssociationArr) {
+        $dcrId = $dcrAssociation.DataCollectionRuleId
+
+        if ($null -eq $dcrId) {
+            Write-Host "DCR for Assoc. $($dcrAssociation.Name) does not exist - skipping" -ForegroundColor Yellow
+            continue
+        }
+
+        $dcr = Get-AzResource -ResourceId $dcrId
+
+        # Get the Data Sources from the DCR   
+        $logFileDataSourceArr = @($dcr.Properties.dataSources.logFiles) 
+        
+        foreach ($logFileDataSource in $logFileDataSourceArr) {
+
+            foreach ($filePattern in $logFileDataSource.filePatterns) {
+                Write-Host "Checking DCR File Pattern: $filePattern for VM $machine" -ForegroundColor Magenta
+
+                # if there are wildcards in the pattern then extract the folder part
+                # else the pattern is a folder only
+                if ($filePattern -match '[\*\?\[\.]') {
+                    $retDcrFolderPath = $filePattern.Substring(0, $filePattern.LastIndexOf('/'))
+                }
+                else {
+                    $retDcrFolderPath = $filePattern
+                }
+
+                if ($retDcrFolderPath -eq $Folder) {
+                    Write-Host "Found matching DCR File Pattern" -ForegroundColor Green
+                    return $retDcrFolderPath
+                }                       
+            }
+        }
+    }
+
+    return $retDcrFolderPath
+}
+
+function New-DcrDataSourceAndAssociation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$dcrName,
+        [Parameter(Mandatory = $true)]
+        [string]$DcrFilePattern,
+        [Parameter(Mandatory = $true)]
+        [string]$vmResourceId
+        )
+
+    $retDcrResource = $null
+    
+    $dcrResource = Get-AzResource -ResourceGroupName $dcrResourceGroup `
+                    -ResourceType "microsoft.insights/datacollectionrules" `
+                    -Name $dcrName `
+                    -ErrorAction SilentlyContinue
+
+    if ($null -eq $dcrResource) {
+        Write-Host "DCR $dcrName does not exist - creating it" -ForegroundColor Yellow
+        # create the DCR if it does not exist
+        $dcr = New-DcrFromWildcard `
+            -dcrName $dcrName `
+            -dcrResourceGroupName $dcrResourceGroup `
+            -dcrSubscriptionId $subscriptionId `
+            -dcrLocation $dcrLocation `
+            -dceName $dceName `
+            -customLogPath $dcrFilePattern `
+            -tableName $tableName `
+            -workspaceName $workspaceName
+
+        $retDcrResource = Get-AzResource -ResourceId $dcr.Id -ErrorAction SilentlyContinue
+    }
+    else {
+        # create the new Data Source
+        $incomingStream = "Custom-Stream"                 # incoming stream name
+        $dataSourceName = $DcrFilePattern + "-logfile"   # friendly name for this data source
+
+        # Cannot have more than one Data Source object of a given type (eg Log File)
+        # So in this case need to add an extra File Pattern to an exisiting data source object
+        if ($null -ne $dcrResource.Properties.dataSources.logFiles) {
+            # the Log Files data source already exists - recreate the object appending the new file pattern
+            $exisitingDataSourceLogFiles = $dcrResource.Properties.dataSources.logFiles[0]
+
+            $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($DcrFilePattern)
+
+            $dcrDataSource = New-AzLogFilesDataSourceObject `
+                -Name $exisitingDataSourceLogFiles.name  `
+                -FilePattern $newFilePatterns `
+                -Stream $exisitingDataSourceLogFiles.streams[0]
+        }
+        else {
+            $dcrDataSource = New-AzLogFilesDataSourceObject `
+                -Name $dataSourceName  `
+                -FilePattern $DcrFilePattern `
+                -Stream $incomingStream
+        }
+
+        # attach this to the exisiting DCR
+        Update-AzDataCollectionRule `
+            -Name $dcrResource.Name `
+            -ResourceGroupName $dcrResource.ResourceGroupName `
+            -SubscriptionId $dcrResource.SubscriptionId `
+            -DataSourceLogFile  $dcrDataSource 
+            
+        $retDcrResource = $dcrResource
+    }
+
+
+    # create the DCR Association
+    $null = New-AzDataCollectionRuleAssociation `
+        -AssociationName $retDcrResource.properties.dataSources.logFiles[0].name `
+        -ResourceUri $vmResourceId `
+        -DataCollectionRuleId $retDcrResource.ResourceId
+
+    return $retDcrResource
+}
+
+        # Create a DCR based on a name
 function New-DcrFromWildcard {
     param (
         [string]$dcrName,
@@ -140,22 +274,24 @@ function New-DcrFromWildcard {
     $payload = $dcrPayload | ConvertTo-Json -depth 10
     
     # Deploy DCR
-    New-AzDataCollectionRule `
+    $retDcr = New-AzDataCollectionRule `
         -Name "$dcrName" `
         -ResourceGroupName "$dcrResourceGroupName" `
         -JsonString $payload
+
+    return $retDcr
 }
 
 # helper function to get the anchor from a wildcard folde pattern
 # ie the base folder before any wildcards
-# example: Get-AnchorFromWildcard -WildcardPathname "/home/*/.bash_history" returns "/home"
+# example: Get-AnchorFromWildcard -SplunkWildcardPathname "/home/*/.bash_history" returns "/home"
 function Get-AnchorFromWildcard {
     param (
-        [string]$WildcardPathname
+        [string]$SplunkWildcardPathname
     )
 
     # Build an "anchor": everything before the first segment that contains a wildcard (* ? [)
-    $segments = $WildcardPathname -split '/'
+    $segments = $SplunkWildcardPathname -split '/'
     $anchorSegments = @()
     $sawWildcard = $false
     foreach ($seg in $segments) {
@@ -164,7 +300,7 @@ function Get-AnchorFromWildcard {
     }
 
     # If the pattern starts with '/', keep it in the anchor for correct matching
-    $leadingSlash = $p.StartsWith('/')
+    $leadingSlash = $SplunkWildcardPathname.StartsWith('/')
 
     $anchor = ($anchorSegments -join '/')
     if ($leadingSlash) { $anchor = "/$anchor" }
@@ -172,35 +308,29 @@ function Get-AnchorFromWildcard {
     return $anchor
 }
 
-# helper function to get the first matching wildcard pattern and type for a given folder
-function Get-FirstMatchingPath { 
+# helper function to get the first matching wildcard pattern (converted to a DCR FilePattern) for a given folder
+# for example if the Folder parameter is '/var/log' 
+# and that matches the RegEx wildcard path '/var/[^/]+]/[^/]+.log' then return what DCR can process:
+# the folder + globbed filename pattern. that is: '/var/log/*.log' 
+function Get-FirstDcrFilePattern { 
     param (
         [string]$Folder,
-        [array]$Categorized
+        [array]$splunkWildcardPaths
     )
 
-    foreach ($item in $Categorized) {
-        $pattern = $item.Path
-        $dcrName = $item.dcrName
+    foreach ($item in $splunkWildcardPaths) {
+        # eg '/var/.../*.log' becomes '/var/.*/[^/]+.log'
+        $regexPattern = Convert-SplunkWildcardToRegex -Pattern $item
 
-        # if there are no wildcards then the pattern is a folder itself
-        if ($pattern -match '[\*\?\[\.]') {
-            $wildcardFolder = $pattern.Substring(0, $pattern.LastIndexOf('/'))
-            # this ensures that "/home/admin matches "/home/*" but not "/home/admin/docs" 
-            $wildcardFolderRegex = $wildcardFolder + "[^/]+$"
-        }
-        else {
-            $wildcardFolder = $pattern
-            # no wildcards to process 
-            $wildcardFolderRegex = $wildcardFolder
-        }
+        # eg '/*.log'
+        $splunkPatternFileName = $item.Substring($item.LastIndexOf('/'))
 
-
-        if ($Folder -match $wildcardFolderRegex) {
-            return [PSCustomObject]@{
-                Path = $pattern
-                DcrName = $dcrName
-            }
+        # eg '/var/log' + '/*.log'
+        $dcrFilePattern = $Folder + $splunkPatternFileName
+        
+        # eg '/var/log/*.log' matches '/var/[^/]+/[^/]+.log'
+        if ($dcrFilePattern -match $regexPattern) {
+            return $dcrFilePattern
         }
     }
     return $null
@@ -338,217 +468,137 @@ curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-
     Write-Host "Started async job for pre ingestion with ID: $($job.Id)" -ForegroundColor Blue
 }
 
-foreach ($vm in $azureLinuxVMs) {
-    $subscriptionId = $vm[0]
-    $resourceGroup = $vm[1]
-    $machine = $vm[2]
-    $dceName = $vm[3]
-    $workspaceName = $vm[4]
-    $tableName = $vm[5]
+function main {
+    param (
+        [Parameter(Mandatory = $true)]
+        [array]$SplunkWildcardPaths,
+        [Parameter(Mandatory = $true)]
+        [array]$VmList
+    )
 
-    Set-AzContext -Subscription $subscriptionId
 
-    Write-Host "Processing Azure Windows VM: $machine in Resource Group: $resourceGroup under Subscription: $subscriptionId" -ForegroundColor Green
+    foreach ($vm in $VmList) {
+        $subscriptionId = $vm[0]
+        $resourceGroup = $vm[1]
+        $machine = $vm[2]
+        $dceName = $vm[3]
+        $workspaceName = $vm[4]
+        $tableName = $vm[5]
 
-    # make big command as run-command is expensive, so do once per server
-    $cmds = ""
-    foreach ($wildcardPath in $linuxPaths) {
-        $anchor = Get-AnchorFromWildcard -WildcardPathname $wildcardPath
-        # if path contains a wildcard then use dirname to return the folder name only
-        # else we already have the folder name eg /etc
-        if ($wildcardPath -match '[\*\?\[\.]') {
-            $pipeline = "| xargs -I {} dirname {} | sort -u"
+        Set-AzContext -Subscription $subscriptionId
+
+        Write-Host "Processing Azure Windows VM: $machine in Resource Group: $resourceGroup under Subscription: $subscriptionId" -ForegroundColor Green
+
+        # make big command as run-command is expensive, so do once per server
+        $cmds = ""
+        foreach ($wildcardPath in $SplunkWildcardPaths) {
+            $anchor = Get-AnchorFromWildcard -SplunkWildcardPathname $splunkWildcardPaths
+            # if path contains a wildcard then use dirname to return the folder name only
+            # else we already have the folder name eg /etc
+            if ($wildcardPath -match '[\*\?\[\.]') {
+                $pipeline = "| xargs -I {} dirname {} | sort -u"
+            }
+            else {
+                $pipeline = "| sort -u"
+            }
+            $cmd = 'find $anchor -wholename "$path" $pipeline' `
+                -replace '\$anchor', $anchor `
+                -replace '\$path', $wildcardPath `
+                -replace '\$pipeline', $pipeline
+            $cmds += $cmd + "; "
         }
-        else {
-            $pipeline = "| sort -u"
+
+        # create a runCommand function and pass in OS and IsOnPrem parameters
+        # TODO error handling if the VM is not reachable
+        $result = $null
+        try {
+            if ($IsTestingMode) {
+                $resultArr = ,@('/var/log')
+            }
+            else {
+                $result = Invoke-AzVMRunCommand `
+                    -ResourceGroupName $resourceGroup `
+                    -VMName $machine `
+                    -CommandId 'RunShellScript' `
+                    -ScriptString $cmds              }
+    
         }
-        $cmd = 'find $anchor -wholename "$path" $pipeline' `
-            -replace '\$anchor', $anchor `
-            -replace '\$path', $wildcardPath `
-            -replace '\$pipeline', $pipeline
-        $cmds += $cmd + "; "
-    }
-
-    # create a runCommand function and pass in OS and IsOnPrem parameters
-    # TODO error handling if the VM is not reachable
-    $result = $null
-    try {
-        $result = Invoke-AzVMRunCommand `
-            -ResourceGroupName $resourceGroup `
-            -VMName $machine `
-            -CommandId 'RunShellScript' `
-            -ScriptString $cmds        
-    }
-    catch {
-        Write-Host "Error executing Run Command on VM ${machine}: $_" -ForegroundColor Red
-        continue
-    }
-
-
-    # convert the multiline string returned to an array
-    # Value[0] is StdOut on Windows. 
-    # On Linux I bleieve its all combined so just ignore results that do not start with a /
-    $resultArr = $result.Value[0].Message -split "`n"
-
-    # keep the unique entries in the array
-    $resultArrUnique = $resultArr | Select-Object -Unique
-
-    foreach ($folder in $resultArrUnique) {
-
-        # filter out any non-linux folder paths
-        if ($folder -notlike "/*") {
+        catch {
+            Write-Host "Error executing Run Command on VM ${machine}: $_" -ForegroundColor Red
             continue
         }
 
-        # lookup the first wildcard pattern and type associated with this folder
-        $firstMatch = Get-FirstMatchingPath -Folder $folder -Categorized $categorisedWildcards
 
-        $dcrFolderPathExists = $false
+        # convert the multiline string returned to an array
+        # Value[0] is StdOut on Windows. 
+        # On Linux I bleieve its all combined so just ignore results that do not start with a /
+        if ($IsTestingMode -eq $false) {
+            $resultArr = $result.Value[0].Message -split "`n"
+        }
 
-        Write-Host "Wildcard paths found on ${machine}:" -ForegroundColor Yellow
-        Write-Host $folder -ForegroundColor Cyan
+        # keep the unique entries in the array
+        $resultArrUnique = $resultArr | Select-Object -Unique
 
-        # Get the VM Resource Id
-        $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.Compute/virtualMachines").ResourceId
+        foreach ($folder in $resultArrUnique) {
 
-        # Is there a DCR Association for this VM
-        $dcrAssociationArr = @(Get-AzDataCollectionRuleAssociation -ResourceUri $vmResourceId)
-
-        foreach ($dcrAssociation in $dcrAssociationArr) {
-            $dcrId = $dcrAssociation.DataCollectionRuleId
-
-            if ($null -eq $dcrId) {
-                Write-Host "DCR for Assoc. $($dcrAssociation.Name) does not exist - skipping" -ForegroundColor Yellow
+            # filter out any non-linux folder paths
+            if ($folder -notlike "/*") {
                 continue
             }
 
-            $dcr = Get-AzResource -ResourceId $dcrId
+            # lookup the first wildcard pattern and type associated with this folder
+            $dcrFilePattern = Get-FirstDcrFilePattern -Folder $folder -splunkWildcardPaths $splunkWildcardPaths
 
-            # Get the Data Sources from the DCR   
-            $logFileDataSourceArr = @($dcr.Properties.dataSources.logFiles) 
-            
-            foreach ($logFileDataSource in $logFileDataSourceArr) {
+            Write-Host "Wildcard paths found on ${machine}:" -ForegroundColor Yellow
+            Write-Host $folder -ForegroundColor Cyan
 
-                foreach ($filePattern in $logFileDataSource.filePatterns) {
-                    Write-Host "Checking DCR File Pattern: $filePattern for VM $machine" -ForegroundColor Magenta
+            # Get the VM Resource Id
+            $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.Compute/virtualMachines").ResourceId
 
-                    # if there are wildcards in the pattern then extract the folder part
-                    # else the pattern is a folder only
-                    if ($filePattern -match '[\*\?\[\.]') {
-                        $dcrFolderPath = $filePattern.Substring(0, $filePattern.LastIndexOf('/'))
-                    }
-                    else {
-                        $dcrFolderPath = $filePattern
-                    }
+            $dcrFolderPath = Get-DcrFolderPath -VmResourceId $vmResourceId -Folder $folder
 
-                    if ($dcrFolderPath -eq $folder) {
-                        Write-Host "Found matching DCR File Pattern" -ForegroundColor Green
-                        $dcrFolderPathExists = $true
-                    }                       
-                }
-            }
-        }
+            if ($null -eq $dcrFolderPath) {
+                # lookup the Dcr Id based on the Resource Group and Name
+                $dcrName  = $(Get-DcrNameFromWildcard $dcrFilePattern)
 
-        if ($dcrFolderPathExists -eq $false) {
-            # lookup the Dcr Id based on the Resource Group and Name
-            $dcrName = $(Get-DcrNameFromWildcard $firstMatch.Path)
+                $dcr = New-DcrDataSourceAndAssociation -DcrName $dcrName -DcrFilePattern $dcrFilePattern -vmResourceId $vmResourceId
 
-            $dcr = Get-AzResource -ResourceGroupName $dcrResourceGroup `
-            -ResourceType "microsoft.insights/datacollectionrules" `
-            -Name $dcrName `
-            -ErrorAction SilentlyContinue
+                if ($dcr) {
+                    # lookup the workspace immutable id based on the name and resourcegroup
+                    $workspace = Get-AzOperationalInsightsWorkspace -ResourceGroupName $dcrResourceGroup -Name $workspaceName
+                    $workspaceId = $workspace.CustomerId
 
-            if ($null -eq $dcr) {
-                Write-Host "DCR $dcrName does not exist - creating it" -ForegroundColor Yellow
-                # create the DCR if it does not exist
-                New-DcrFromWildcard `
-                    -dcrName $dcrName `
-                    -dcrResourceGroupName $dcrResourceGroup `
-                    -dcrSubscriptionId $subscriptionId `
-                    -dcrLocation $dcrLocation `
-                    -dceName $dceName `
-                    -customLogPath $firstMatch.Path `
+                    # lookup the DCE endpoint
+                    $dce = Get-AzResource -ResourceId $dcr.Properties.dataCollectionEndpointId
+
+                    # output the command we are about to run into the log
+                    Write-Host "Starting async command to monitor and ingest logs for VM $machine, DCR $dcrName, Log File Path $dcrFilePattern" -ForegroundColor Blue
+
+                    # at this point we have the DCR, Data Source, Folder Path and Association created
+                    # the detection of the new log file and the creation of the DCR plus time to first ingestion
+                    # will take some time
+                    # start an async run-command to monitor the target table and ingest any missing log file entries
+                    RunCommandAsyncToIngestMissingLogs `
+                    -SubscriptionId $subscriptionId `
+                    -ResourceGroupName $resourceGroup `
+                    -VMName $machine `
+                    -DcrName $dcr.Name `
+                    -LogFilePath $dcrFilePattern `
+                    -scriptStorageAccount $scriptStorageAccount `
+                    -scriptContainerName $scriptContainerName `
+                    -isArcConnectedMachine $false `
+                    -dcrImmutableId $dcr.Properties.immutableId `
+                    -dceEndpointId $dce.Properties.logsIngestion.endpoint `
+                    -WorkspaceId $workspaceId `
                     -tableName $tableName `
-                    -workspaceName $workspaceName
-
-                # re-fetch the DCR now it exists
-                $dcr = Get-AzResource -ResourceGroupName $dcrResourceGroup -ResourceType "microsoft.insights/datacollectionrules" -Name $dcrName
+                    -timestampColumn "TimeGenerated" `
+                    -timespan "P1D" 
+                }
             }
-            else {
-                # create the new Data Source
-                $incomingStream = "Custom-Stream"                 # incoming stream name
-                $dataSourceName = $firstMatch.dcrName + "-logfile"   # friendly name for this data source
-
-                # if there are wildcards in the pattern then append the file part
-                # else the pattern is a folder only
-                if ($firstMatch.Path -match '[\*\?\[\.]') {
-                    $filePattern = $folder + $firstMatch.Path.Substring($firstMatch.Path.LastIndexOf('/'))           # array of file patterns
-                }
-                else {
-                    $filePattern = $folder
-                }
-
-                # Cannot have more than one Data Source object of a given type (eg Log File)
-                # So in this case need to add an extra File Pattern to an exisiting data source object
-                if ($null -ne $dcr.Properties.dataSources.logFiles) {
-                    # the Log Files data source already exists - recreate the object appending the new file pattern
-                    $exisitingDataSourceLogFiles = $dcr.Properties.dataSources.logFiles[0]
-
-                    $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($filePattern)
-
-                    $dcrDataSource = New-AzLogFilesDataSourceObject `
-                    -Name $exisitingDataSourceLogFiles.name  `
-                    -FilePattern $newFilePatterns `
-                    -Stream $exisitingDataSourceLogFiles.streams[0]
-                }
-                else {
-                    $dcrDataSource = New-AzLogFilesDataSourceObject `
-                    -Name $dataSourceName  `
-                    -FilePattern $filePattern `
-                    -Stream $incomingStream
-                }
-
-                # attach this to the exisiting DCR
-                Update-AzDataCollectionRule `
-                    -Name $dcr.Name `
-                    -ResourceGroupName $dcr.ResourceGroupName `
-                    -SubscriptionId $dcr.SubscriptionId `
-                    -DataSourceLogFile  $dcrDataSource
-                
-            }
-            # create the DCR Association
-            # TODO this may already exist - so ignore that error
-            New-AzDataCollectionRuleAssociation `
-            -AssociationName $dcr.Properties.dataSources.logFiles.name `
-            -ResourceUri $vmResourceId `
-            -DataCollectionRuleId $dcr.ResourceId
-
-            # lookup the workspace immutable id based on the name and resourcegroup
-            $workspace = Get-AzOperationalInsightsWorkspace -ResourceGroupName $dcrResourceGroup -Name $workspaceName
-            $workspaceId = $workspace.CustomerId
-
-            # lookup the DCE endpoint
-            $dce = Get-AzResource -ResourceId $dcr.Properties.dataCollectionEndpointId
-
-            # at this point we have the DCR, Data Source, Folder Path and Association created
-            # the detection of the new log file and the creation of the DCR plus time to first ingestion
-            # will take some time
-            # start an async run-command to monitor the target table and ingest any missing log file entries
-            RunCommandAsyncToIngestMissingLogs `
-            -SubscriptionId $subscriptionId `
-            -ResourceGroupName $resourceGroup `
-            -VMName $machine `
-            -DcrName $dcr.Name `
-            -LogFilePath $filePattern `
-            -scriptStorageAccount $scriptStorageAccount `
-            -scriptContainerName $scriptContainerName `
-            -isArcConnectedMachine $false `
-            -dcrImmutableId $dcr.Properties.immutableId `
-            -dceEndpointId $dce.Properties.logsIngestion.endpoint `
-            -WorkspaceId $workspaceId `
-            -tableName $tableName `
-            -timestampColumn "TimeGenerated" `
-            -timespan "P1D" 
         }
     }
 }
+
+main -SplunkWildcardPaths $splunkWildcardPaths -VmList $azureLinuxVMs
+
+

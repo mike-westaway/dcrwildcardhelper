@@ -80,8 +80,19 @@ function log2json() {
         timestamp=$(echo "$line" | awk '{print $1}')
 
         # Convert to epoch seconds
-        epoch_timestamp=$(date -d "$timestamp" +%s)
-        epoch_maximum=$(date -d "$maximum_timestamp" +%s)
+        epoch_timestamp=$(date -d "$timestamp" +%s 2>&1)
+
+        if [[ $? -ne 0 ]]; then
+            # If date conversion fails, skip this line
+            continue
+        fi
+
+        epoch_maximum=$(date -d "$maximum_timestamp" +%s 2>&1)
+
+        if [[ $? -ne 0 ]]; then
+            # If date conversion fails, skip this line
+            continue
+        fi
 
         # Skip lines that don't match today's date
         if [[ "$timestamp" != "$today"* ]]; then
@@ -211,12 +222,12 @@ function ingestJson() {
     local TABLE_NAME=$2 # eg "WaAgent3_CL"
     local ENDPOINT_URI=$3 # eg "https://my-endpoint.uksouth-1.ingest.monitor.azure.com" 
     local JSON_LOG_FILE=$4 # eg "waagent_log_1.json"
-    local isArcConnectedMachine=$5 # "true" or "false"
+    local IS_ARC_CONNECTED_MACHINE=$5 # "true" or "false"
 
     RESOURCE="https://monitor.azure.com"
 
     # Get the Entra access token
-    if ($IS_ARC_CONNECTED_MACHINE == "true") ; then
+    if [[ "$IS_ARC_CONNECTED_MACHINE" == "true" ]]; then
         TOKEN=$(getAccessTokenArc $RESOURCE)
     else
         TOKEN=$(getAccessTokenAzure $RESOURCE)
@@ -227,6 +238,8 @@ function ingestJson() {
 
     # Build the URI
     URI="$ENDPOINT_URI/dataCollectionRules/$DCR_IMMUTABLE_ID/streams/${STREAM_NAME}?api-version=2023-01-01"
+
+    echo "injestJson $DCR_IMMUTABLE_ID $TABLE_NAME $URI $JSON_LOG_FILE $IS_ARC_CONNECTED_MACHINE ${TOKEN:0:10}"
 
     # upload the JSON logs
     # there is a limit of 1 MB on the payload

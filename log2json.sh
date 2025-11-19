@@ -19,9 +19,20 @@ while IFS= read -r line; do
     timestamp=$(echo "$line" | awk '{print $1}')
 
     # Convert to epoch seconds
-    epoch_timestamp=$(date -d "$timestamp" +%s)
-    epoch_maximum=$(date -d "$maximum_timestamp" +%s)
+    epoch_timestamp=$(date -d "$timestamp" +%s 2>&1)
 
+    if [[ $? -ne 0 ]]; then
+        # If date conversion fails, skip this line
+        continue
+    fi
+
+    epoch_maximum=$(date -d "$maximum_timestamp" +%s 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        # If date conversion fails, skip this line
+        continue
+    fi
+    
     # Skip lines that don't match today's date
     if [[ "$timestamp" != "$today"* ]]; then
         continue
