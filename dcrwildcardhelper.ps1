@@ -23,9 +23,6 @@ $linuxSplunkWildcardPatterns = @(
 $windowsPaths = @(
 )
 
-# test using linux wildcards
-$splunkWildcardPaths = $linuxSplunkWildcardPatterns
-
 # location for the DCRs
 $dcrLocation = "uksouth"
 # storage account for scripts and script logs
@@ -34,8 +31,8 @@ $scriptStorageAccount = "arcserversukssa"
 $scriptContainerName = "scripts"
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
-$onmpremLinuxVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "arc-servers-uks", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs_CL")
+$arcLinuxVMs = ,@(
+    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "arc-servers-uks", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")
 )
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
@@ -186,7 +183,7 @@ function New-DcrDataSourceAndAssociation {
         }
 
         # attach this to the exisiting DCR
-        Update-AzDataCollectionRule `
+        $null = Update-AzDataCollectionRule `
             -Name $dcrResource.Name `
             -ResourceGroupName $dcrResource.ResourceGroupName `
             -SubscriptionId $dcrResource.SubscriptionId `
@@ -451,19 +448,29 @@ curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-
 
     if ($isArcConnectedMachine -eq $true) {
         $script = $scriptConnectedMachine
+
+        $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
+
+        $job = New-AzConnectedMachineRunCommand `
+            -ResourceGroupName $ResourceGroupName `
+            -MachineName $VMName `
+            -Location $dcrLocation `
+            -RunCommandName "ArcRunCommand" `
+            –SourceScript $scriptOneLine `
+            -AsJob
     }
     else {
         $script = $scriptVM
-    }
-    
-    $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
-    $job = Invoke-AzVMRunCommand `
-    -ResourceGroupName $ResourceGroupName `
-    -VMName $VMName `
-    -CommandId 'RunShellScript' `
-    -ScriptString $scriptOneLine  `
-    -AsJob
+        $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
+
+        $job = Invoke-AzVMRunCommand `
+        -ResourceGroupName $ResourceGroupName `
+        -VMName $VMName `
+        -CommandId 'RunShellScript' `
+        -ScriptString $scriptOneLine  `
+        -AsJob
+    }
 
     Write-Host "Started async job for pre ingestion with ID: $($job.Id)" -ForegroundColor Blue
 }
@@ -473,7 +480,9 @@ function main {
         [Parameter(Mandatory = $true)]
         [array]$SplunkWildcardPaths,
         [Parameter(Mandatory = $true)]
-        [array]$VmList
+        [array]$VmList,
+        [Parameter(Mandatory = $true)]
+        [System.Boolean]$IsArcConnectedMachine
     )
 
 
@@ -553,7 +562,12 @@ function main {
             Write-Host $folder -ForegroundColor Cyan
 
             # Get the VM Resource Id
-            $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.Compute/virtualMachines").ResourceId
+            if ($IsArcConnectedMachine -eq $true) {
+                $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.HybridCompute/machines").ResourceId
+            }
+            else {  
+                $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.Compute/virtualMachines").ResourceId
+            }
 
             $dcrFolderPath = Get-DcrFolderPath -VmResourceId $vmResourceId -Folder $folder
 
@@ -586,7 +600,7 @@ function main {
                     -LogFilePath $dcrFilePattern `
                     -scriptStorageAccount $scriptStorageAccount `
                     -scriptContainerName $scriptContainerName `
-                    -isArcConnectedMachine $false `
+                    -isArcConnectedMachine $IsArcConnectedMachine `
                     -dcrImmutableId $dcr.Properties.immutableId `
                     -dceEndpointId $dce.Properties.logsIngestion.endpoint `
                     -WorkspaceId $workspaceId `
@@ -599,6 +613,10 @@ function main {
     }
 }
 
-main -SplunkWildcardPaths $splunkWildcardPaths -VmList $azureLinuxVMs
+# entry point for Azure Linux VMs
+#main -SplunkWildcardPaths $linuxSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false
+
+# Entry point for Arc Linux VMs
+main -SplunkWildcardPaths $linuxSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true
 
 
