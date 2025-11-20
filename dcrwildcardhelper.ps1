@@ -406,7 +406,7 @@ blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`
 curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
 chmod +x "`$local_file"
 sed -i 's/\r$//' "./`$local_file"
-"./`$local_file" `$workspaceId `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$isArcConnectedMachine > "`${local_file%.sh}.log" 2>&1
+"./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$isArcConnectedMachine > "`${local_file%.sh}.log" 2>&1
 echo "Part III Upload log file"
 log_blob_name="`${blob_name%.sh}.log"
 log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"

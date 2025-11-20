@@ -28,7 +28,7 @@ function getEarliestTimestamp() {
     PAYLOAD=$(printf '{ "query": "%s", "timespan": "%s" }' "$KQL" "$TIMESPAN")
 
     # Get the Entra access token
-    if ($IS_ARC_CONNECTED_MACHINE == "true") ; then
+    if [ "$IS_ARC_CONNECTED_MACHINE" = "true" ] ; then
         ACCESS_TOKEN=$(getAccessTokenArc $RESOURCE)
     else
         ACCESS_TOKEN=$(getAccessTokenAzure $RESOURCE)
