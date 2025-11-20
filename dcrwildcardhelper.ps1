@@ -15,8 +15,12 @@ $IsTestingMode = $true
 # Splunk wildcards are proprietary as are DCR wildcards
 # for example Splunk '/var/.../*.log' becomes '/var/.*/[^/]+.log' in RegEx and '/var/myparentfolder/myfolder*/*.log in DCR (multiple potentially required) 
 # for example Splunk '/var/*/*.log' becomes '/var/[^/]+/[^/]+.log' in RegEx and '/var/myfolder*/*.log' in DCR (multiple potentially required)
-$linuxSplunkWildcardPatterns = @(
+$linuxAzureSplunkWildcardPatterns = @(
     "/var/log/waagent*.log"
+)
+
+$linuxArcSplunkWildcardPatterns = @(
+    "/var/log/azure/run-command-handler/handler*.log"
 )
 
 # Define the Windows paths
@@ -372,21 +376,43 @@ function RunCommandAsyncToIngestMissingLogs {
     # http://localhost:40342/metadata/identity/oauth2/token?api-version=2020-06-01&resource=<resource>
     # on Azure linux curl -s -H "Metadata: true" "$ENDPOINT" returns JSON with access_token
 
-    $imdsHostVM = "169.254.169.254"
-    $imdsHostConnectedMachine = "localhost:40342"
+    if ($isArcConnectedMachine -eq $true) {
+        $imdsHost = "localhost:40342"
+    }
+    else {
+        $imdsHost = "169.254.169.254"
+    }
     
-    $scriptConnectedMachine = @"
+    $script = @"
 echo "Part I Get Access Token"
 API_VERSION="2020-06-01"
 RESOURCE="https://storage.azure.com/"
-IDENTITY_ENDPOINT="http://$imdsHostConnectedMachine/metadata/identity/oauth2/token"
+IDENTITY_ENDPOINT="http://$imdsHost/metadata/identity/oauth2/token"
 ENDPOINT="`${IDENTITY_ENDPOINT}?resource=`${RESOURCE}&api-version=`${API_VERSION}"
+"@
+
+# this ensures the next chunk starts on a new line
+$script += "`n"
+
+if ($isArcConnectedMachine -eq $true) {
+    $script += @"
 WWW_AUTH_HEADER=`$(curl -s -D - -o /dev/null -H "Metadata: true" "`$ENDPOINT" | grep -i "WWW-Authenticate")
-SECRET_FILE=""
-if [[ `$WWW_AUTH_HEADER =~ Basic\ realm=([^\ ]+) ]]; then SECRET_FILE=`$(echo `${BASH_REMATCH[1]} | sed 's/[$\r]*$//'); else echo "Error 001" && exit 1; fi
+SECRET_FILE=`$(echo `$WWW_AUTH_HEADER | awk -F 'Basic realm=' '{print `$2}' | sed 's/\r$//')
 if [[ ! -f "`$SECRET_FILE" ]]; then echo "Error 2" && exit 1; fi
 SECRET=`$(cat "`$SECRET_FILE")
 RESPONSE=`$(curl -s -H "Metadata: true" -H "Authorization: Basic `$SECRET" "`$ENDPOINT")
+"@
+}
+else {
+    $script += @"
+RESPONSE=`$(curl -s -H "Metadata: true" "`$ENDPOINT")`
+"@
+}
+
+# this ensures the next chunk starts on a new line
+$script += "`n"
+
+$script += @"
 ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
 echo "Part II Download script"
@@ -402,68 +428,30 @@ blob_name="waitForLogsAndIngest.sh"
 local_file="waitForLogsAndIngest.sh"
 workspace_id=$workspaceId
 computer_name=$VMName
+is_arc_connected_machine=$isArcConnectedMachine
 blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${blob_name}"
 curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
 chmod +x "`$local_file"
 sed -i 's/\r$//' "./`$local_file"
-"./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$isArcConnectedMachine > "`${local_file%.sh}.log" 2>&1
+bash "./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$is_arc_connected_machine > "`${local_file%.sh}.log" 2>&1
 echo "Part III Upload log file"
 log_blob_name="`${blob_name%.sh}.log"
 log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
 curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" -H "x-ms-blob-type: BlockBlob" --data-binary @"`${local_file%.sh}.log" "`$log_blob_url"
 "@
 
-    $scriptVM = @"
-echo "Part I Get Access Token"
-API_VERSION="2020-06-01"
-RESOURCE="https://storage.azure.com/"
-IDENTITY_ENDPOINT="http://$imdsHostVM/metadata/identity/oauth2/token"
-ENDPOINT="`${IDENTITY_ENDPOINT}?resource=`${RESOURCE}&api-version=`${API_VERSION}"
-RESPONSE=`$(curl -s -H "Metadata: true" "`$ENDPOINT")
-ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
-echo "Part II Download script"
-storage_account=$scriptStorageAccount
-container_name=$scriptContainerName
-source_log_file=$LogFilePath
-target_table=$tableName
-dcr_immutable_id=$dcrImmutableId
-endpoint_uri=$dceEndpointId
-timestamp_column=$timestampColumn
-time_span=$timespan
-blob_name="waitForLogsAndIngest.sh"
-local_file="waitForLogsAndIngest.sh"
-workspace_id=$workspaceId
-computer_name=$VMName
-blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${blob_name}"
-curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
-chmod +x "`$local_file"
-sed -i 's/\r$//' "./`$local_file"
-"./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$isArcConnectedMachine > "`${local_file%.sh}.log" 2>&1
-echo "Part III Upload log file"
-log_blob_name="`${blob_name%.sh}.log"
-log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
-curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" -H "x-ms-blob-type: BlockBlob" --data-binary @"`${local_file%.sh}.log" "`$log_blob_url"
-"@
+    $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
     if ($isArcConnectedMachine -eq $true) {
-        $script = $scriptConnectedMachine
-
-        $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
-
         $job = New-AzConnectedMachineRunCommand `
             -ResourceGroupName $ResourceGroupName `
             -MachineName $VMName `
             -Location $dcrLocation `
-            -RunCommandName "ArcRunCommand" `
+            -RunCommandName "ArcRunCmd" `
             –SourceScript $scriptOneLine `
             -AsJob
     }
     else {
-        $script = $scriptVM
-
-        $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
-
         $job = Invoke-AzVMRunCommand `
         -ResourceGroupName $ResourceGroupName `
         -VMName $VMName `
@@ -522,7 +510,10 @@ function main {
         $result = $null
         try {
             if ($IsTestingMode) {
-                $resultArr = ,@('/var/log')
+                # Azure test case
+                #$resultArr = ,@('/var/log')
+                # Arc Test Case
+                $resultArr = ,@('/var/log/azure/run-command-handler')
             }
             else {
                 $result = Invoke-AzVMRunCommand `
@@ -557,6 +548,12 @@ function main {
 
             # lookup the first wildcard pattern and type associated with this folder
             $dcrFilePattern = Get-FirstDcrFilePattern -Folder $folder -splunkWildcardPaths $splunkWildcardPaths
+
+            # if no matches log the error and continue
+            if ($null -eq $dcrFilePattern) {
+                Write-Host "No matching wildcard pattern found for folder $folder on VM $machine - skipping" -ForegroundColor Yellow
+                continue
+            }
 
             Write-Host "Wildcard paths found on ${machine}:" -ForegroundColor Yellow
             Write-Host $folder -ForegroundColor Cyan
@@ -614,9 +611,9 @@ function main {
 }
 
 # entry point for Azure Linux VMs
-#main -SplunkWildcardPaths $linuxSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false
+#main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false
 
 # Entry point for Arc Linux VMs
-main -SplunkWildcardPaths $linuxSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true
+main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true
 
 

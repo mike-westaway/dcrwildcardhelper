@@ -28,10 +28,10 @@ function getEarliestTimestamp() {
     PAYLOAD=$(printf '{ "query": "%s", "timespan": "%s" }' "$KQL" "$TIMESPAN")
 
     # Get the Entra access token
-    if [ "$IS_ARC_CONNECTED_MACHINE" = "true" ] ; then
-        ACCESS_TOKEN=$(getAccessTokenArc $RESOURCE)
+    if [[ "$IS_ARC_CONNECTED_MACHINE" = "true" ]] ; then
+        ACCESS_TOKEN=$(getAccessTokenArc $RESOURCE $LOGFILE)
     else
-        ACCESS_TOKEN=$(getAccessTokenAzure $RESOURCE)
+        ACCESS_TOKEN=$(getAccessTokenAzure $RESOURCE $LOGFILE)
     fi
 
     KQL_RESULT=$(curl -X POST "$RESOURCE/v1/workspaces/$WORKSPACE_ID/query" \
@@ -39,9 +39,9 @@ function getEarliestTimestamp() {
     -H "Content-Type: application/json" \
     -d "$PAYLOAD")
 
-    TIMESTAMP=$(echo $KQL_RESULT | awk -F'"rows":\\[\\["|"]]}' '{print $2}')
+    TIMESTAMP=$(echo $KQL_RESULT | awk -F'"rows":\\[\\["|"]]}' '{print $2}' | sed 's/\r$//')
 
-    echo "Access Token (trunc): ${ACCESS_TOKEN:0:10}..." > $LOGFILE
+    echo "Access Token (trunc): ${ACCESS_TOKEN:0:10}..." >> $LOGFILE
     echo "KQL Query: $KQL" >> $LOGFILE
     echo "Payload: $PAYLOAD" >> $LOGFILE
     echo "KQL Result: $KQL_RESULT" >> $LOGFILE
@@ -111,7 +111,7 @@ function log2json() {
         json_line="  {\"TimeGenerated\": \"$timestamp\", \"RawData\": \"$raw_data\"}"
 
         # Add comma if not first line
-        if [ "$first_line" = true ]; then
+        if [[ "$first_line" = true ]]; then
             first_line=false
         else
             json_line=",$json_line"
@@ -146,6 +146,7 @@ function log2json() {
 ###
 function getAccessTokenArc() {
     local RESOURCE=$1 # eg "https://storage.azure.com/"
+    local LOGFILE=$2 # eg "./getAccessTokenArc.log"
     # Config
     # This is the IMDS endpoint used by the System Managed Identity to get tokens
     API_VERSION="2020-06-01"
@@ -156,20 +157,13 @@ function getAccessTokenArc() {
     WWW_AUTH_HEADER=$(curl -s -D - -o /dev/null -H "Metadata: true" "$ENDPOINT" | grep -i "WWW-Authenticate")
 
     # Step 2: Extract secret file path from header
-    SECRET_FILE=""
-    if [[ $WWW_AUTH_HEADER =~ Basic\ realm=([^\ ]+) ]]; then
-        # get rid of '$\r' at end of line
-        SECRET_FILE=$(echo ${BASH_REMATCH[1]} | sed 's/[$\r]*$//')
-        # if this utility is successful then it returns only the ACCESS_TOKEN
-        #echo "Secret file path: $SECRET_FILE"
-    else
-        echo "Failed to extract secret file path from WWW-Authenticate header."
-        exit 1
-    fi
+    SECRET_FILE=$(echo $WWW_AUTH_HEADER | awk -F 'Basic realm=' '{print $2}' | sed 's/\r$//')
 
     # Step 3: Read secret
     if [[ ! -f "$SECRET_FILE" ]]; then
-        echo "Secret file not found: $SECRET_FILE"
+        echo "Secret file not found: $SECRET_FILE" >> $LOGFILE
+        echo "WWW-Authenticate Header: $WWW_AUTH_HEADER" >> $LOGFILE
+        echo "Endpoint: $ENDPOINT" >> $LOGFILE
         exit 1
     fi
 
@@ -185,14 +179,15 @@ function getAccessTokenArc() {
     if [[ -n "$ACCESS_TOKEN" ]]; then
         echo "$ACCESS_TOKEN"
     else
-        echo "Failed to retrieve access token."
-        echo "Response: $RESPONSE"
+        echo "Failed to retrieve access token." >> $LOGFILE
+        echo "Response: $RESPONSE" >> $LOGFILE
         exit 1
     fi
 }
 
 function getAccessTokenAzure() {
     local RESOURCE=$1 # eg "https://storage.azure.com/"
+    local LOGFILE=$2 # eg "./getAccessTokenAzure.log"
     # Config
     # This is the IMDS endpoint used by the System Managed Identity to get tokens
     API_VERSION="2020-06-01"
@@ -208,8 +203,9 @@ function getAccessTokenAzure() {
     if [[ -n "$ACCESS_TOKEN" ]]; then
         echo "$ACCESS_TOKEN"
     else
-        echo "Failed to retrieve access token."
-        echo "Response: $RESPONSE"
+        echo "Failed to retrieve access token." >> $LOGFILE
+        echo "Response: $RESPONSE" >> $LOGFILE
+        echo "Endpoint: $ENDPOINT" >> $LOGFILE
         exit 1
     fi
 }
@@ -223,14 +219,15 @@ function ingestJson() {
     local ENDPOINT_URI=$3 # eg "https://my-endpoint.uksouth-1.ingest.monitor.azure.com" 
     local JSON_LOG_FILE=$4 # eg "waagent_log_1.json"
     local IS_ARC_CONNECTED_MACHINE=$5 # "true" or "false"
+    local LOGFILE=$6 
 
     RESOURCE="https://monitor.azure.com"
 
     # Get the Entra access token
     if [[ "$IS_ARC_CONNECTED_MACHINE" == "true" ]]; then
-        TOKEN=$(getAccessTokenArc $RESOURCE)
+        TOKEN=$(getAccessTokenArc $RESOURCE $LOGFILE) 
     else
-        TOKEN=$(getAccessTokenAzure $RESOURCE)
+        TOKEN=$(getAccessTokenAzure $RESOURCE $LOGFILE)
     fi
 
     #name of the stream in the DCR that represents the destination table
@@ -269,7 +266,10 @@ logFilePath="${script_name%.*}.log"
 
 attempts=0
 
-echo "Script $script_name started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan"
+# make if comparisons case insensitive (so "True" = "true")
+shopt -s nocasematch
+
+echo "Script $script_name started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan, isArcConnectedMachine=$isArcConnectedMachine"
 
 while true; do
     echo "Attempt #$((attempts + 1)) to get earliest timestamp..."
@@ -299,5 +299,5 @@ jsonFileArr=($(log2json $sourceLogFile $targetTable $timestamp))
 echo "Ingesting logs into Log Analytics Workspace table..."
 for jsonLogFile in "${jsonFileArr[@]}"; do
     echo "Ingesting file: $jsonLogFile"
-    ingestJson $dcrImmutableId $targetTable $endpointUri $jsonLogFile $isArcConnectedMachine
+    ingestJson $dcrImmutableId $targetTable $endpointUri $jsonLogFile $isArcConnectedMachine $logFilePath
 done
