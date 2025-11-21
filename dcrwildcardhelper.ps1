@@ -485,12 +485,12 @@ echo "Part II Download script"
 `$ENDPOINT_URI = "$dceEndpointId"
 `$TIMESTAMP_COLUMN = "$timestampColumn"
 `$TIME_SPAN = "$timespan"
-`$BLOB_NAME = "waitForLogsAndIngest.sh"
-`$LOCAL_FILE = "waitForLogsAndIngest.sh"
+`$BLOB_NAME = "waitForLogsAndIngest.ps1"
+`$LOCAL_FILE = "waitForLogsAndIngest.ps1"
 `$WORKSPACE_ID = "$workspaceId"
 `$COMPUTER_NAME = "$VMName"
 `$IS_ARC_CONNECTED_MACHINE = "$isArcConnectedMachine"
-`$LOG_BLOB_NAME = "`$BLOB_NAME -replace '\.sh$', '') + '.log'
+`$LOG_BLOB_NAME = "`$BLOB_NAME -replace '\.ps1$', '') + '.log'
 `$BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${BLOB_NAME}"
 Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -OutFile `$LOCAL_FILE
 & "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" > "`$LOG_BLOB_NAME"
