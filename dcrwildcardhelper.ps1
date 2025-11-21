@@ -337,6 +337,89 @@ function Get-FirstDcrFilePattern {
     return $null
 }
 
+# helper function to build the script that will be executed on the VM
+function Get-IngestScript {
+    param (
+        [bool]$isArcConnectedMachine,
+        [string]$scriptStorageAccount,
+        [string]$LogFilePath,
+        [string]$tableName,
+        [string]$dcrImmutableId,
+        [string]$dceEndpointId,
+        [string]$timestampColumn,
+        [string]$timespan,
+        [string]$scriptContainerName,
+        [string]$workspaceId,
+        [string]$VMName
+    )
+
+    if ($isArcConnectedMachine -eq $true) {
+        $imdsHost = "localhost:40342"
+    }
+    else {
+        $imdsHost = "169.254.169.254"
+    }
+    
+    $script = @"
+echo "Part I Get Access Token"
+API_VERSION="2020-06-01"
+RESOURCE="https://storage.azure.com/"
+IDENTITY_ENDPOINT="http://$imdsHost/metadata/identity/oauth2/token"
+ENDPOINT="`${IDENTITY_ENDPOINT}?resource=`${RESOURCE}&api-version=`${API_VERSION}"
+"@
+
+    # this ensures the next chunk starts on a new line
+    $script += "`n"
+
+    if ($isArcConnectedMachine -eq $true) {
+        $script += @"
+WWW_AUTH_HEADER=`$(curl -s -D - -o /dev/null -H "Metadata: true" "`$ENDPOINT" | grep -i "WWW-Authenticate")
+SECRET_FILE=`$(echo `$WWW_AUTH_HEADER | awk -F 'Basic realm=' '{print `$2}' | sed 's/\r$//')
+if [[ ! -f "`$SECRET_FILE" ]]; then echo "Error 2" && exit 1; fi
+SECRET=`$(cat "`$SECRET_FILE")
+RESPONSE=`$(curl -s -H "Metadata: true" -H "Authorization: Basic `$SECRET" "`$ENDPOINT")
+"@
+    }
+    else {
+        $script += @"
+RESPONSE=`$(curl -s -H "Metadata: true" "`$ENDPOINT")`
+"@
+    }
+
+    # this ensures the next chunk starts on a new line
+    $script += "`n"
+
+    $script += @"
+ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
+echo "Part II Download script"
+storage_account=$scriptStorageAccount
+container_name=$scriptContainerName
+source_log_file=$LogFilePath
+target_table=$tableName
+dcr_immutable_id=$dcrImmutableId
+endpoint_uri=$dceEndpointId
+timestamp_column=$timestampColumn
+time_span=$timespan
+blob_name="waitForLogsAndIngest.sh"
+local_file="waitForLogsAndIngest.sh"
+workspace_id=$workspaceId
+computer_name=$VMName
+is_arc_connected_machine=$isArcConnectedMachine
+blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${blob_name}"
+curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
+chmod +x "`$local_file"
+sed -i 's/\r$//' "./`$local_file"
+bash "./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$is_arc_connected_machine > "`${local_file%.sh}.log" 2>&1
+echo "Part III Upload log file"
+log_blob_name="`${blob_name%.sh}.log"
+log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
+curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" -H "x-ms-blob-type: BlockBlob" --data-binary @"`${local_file%.sh}.log" "`$log_blob_url"
+"@
+
+    return $script
+}
+
 # start an async run-command to monitor the target table and ingest any missing log file entries
 function RunCommandAsyncToIngestMissingLogs {
     param (
@@ -376,69 +459,18 @@ function RunCommandAsyncToIngestMissingLogs {
     # http://localhost:40342/metadata/identity/oauth2/token?api-version=2020-06-01&resource=<resource>
     # on Azure linux curl -s -H "Metadata: true" "$ENDPOINT" returns JSON with access_token
 
-    if ($isArcConnectedMachine -eq $true) {
-        $imdsHost = "localhost:40342"
-    }
-    else {
-        $imdsHost = "169.254.169.254"
-    }
-    
-    $script = @"
-echo "Part I Get Access Token"
-API_VERSION="2020-06-01"
-RESOURCE="https://storage.azure.com/"
-IDENTITY_ENDPOINT="http://$imdsHost/metadata/identity/oauth2/token"
-ENDPOINT="`${IDENTITY_ENDPOINT}?resource=`${RESOURCE}&api-version=`${API_VERSION}"
-"@
-
-# this ensures the next chunk starts on a new line
-$script += "`n"
-
-if ($isArcConnectedMachine -eq $true) {
-    $script += @"
-WWW_AUTH_HEADER=`$(curl -s -D - -o /dev/null -H "Metadata: true" "`$ENDPOINT" | grep -i "WWW-Authenticate")
-SECRET_FILE=`$(echo `$WWW_AUTH_HEADER | awk -F 'Basic realm=' '{print `$2}' | sed 's/\r$//')
-if [[ ! -f "`$SECRET_FILE" ]]; then echo "Error 2" && exit 1; fi
-SECRET=`$(cat "`$SECRET_FILE")
-RESPONSE=`$(curl -s -H "Metadata: true" -H "Authorization: Basic `$SECRET" "`$ENDPOINT")
-"@
-}
-else {
-    $script += @"
-RESPONSE=`$(curl -s -H "Metadata: true" "`$ENDPOINT")`
-"@
-}
-
-# this ensures the next chunk starts on a new line
-$script += "`n"
-
-$script += @"
-ACCESS_TOKEN=`$(echo "`$RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-if [ -n "`$ACCESS_TOKEN" ]; then echo "`$ACCESS_TOKEN"; else echo "Error 003 `$RESPONSE" && exit 1; fi
-echo "Part II Download script"
-storage_account=$scriptStorageAccount
-container_name=$scriptContainerName
-source_log_file=$LogFilePath
-target_table=$tableName
-dcr_immutable_id=$dcrImmutableId
-endpoint_uri=$dceEndpointId
-timestamp_column=$timestampColumn
-time_span=$timespan
-blob_name="waitForLogsAndIngest.sh"
-local_file="waitForLogsAndIngest.sh"
-workspace_id=$workspaceId
-computer_name=$VMName
-is_arc_connected_machine=$isArcConnectedMachine
-blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${blob_name}"
-curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
-chmod +x "`$local_file"
-sed -i 's/\r$//' "./`$local_file"
-bash "./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$is_arc_connected_machine > "`${local_file%.sh}.log" 2>&1
-echo "Part III Upload log file"
-log_blob_name="`${blob_name%.sh}.log"
-log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
-curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" -H "x-ms-blob-type: BlockBlob" --data-binary @"`${local_file%.sh}.log" "`$log_blob_url"
-"@
+    $script = Get-IngestScript `
+        -isArcConnectedMachine $isArcConnectedMachine `
+        -scriptStorageAccount $scriptStorageAccount `
+        -LogFilePath $LogFilePath `
+        -tableName $tableName `
+        -dcrImmutableId $dcrImmutableId `
+        -dceEndpointId $dceEndpointId `
+        -timestampColumn $timestampColumn `
+        -timespan $timespan `
+        -scriptContainerName $scriptContainerName `
+        -workspaceId $workspaceId `
+        -VMName $VMName
 
     $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
