@@ -338,7 +338,7 @@ function Get-FirstDcrFilePattern {
 }
 
 # helper function to build the script that will be executed on the VM
-function Get-IngestScript {
+function Get-IngestScriptLinux {
     param (
         [bool]$isArcConnectedMachine,
         [string]$scriptStorageAccount,
@@ -420,6 +420,136 @@ curl -X PUT -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-
     return $script
 }
 
+# Refer to this article for how to get the access_token 
+# https://learn.microsoft.com/en-us/azure/azure-arc/servers/managed-identity-authentication#acquiring-an-access-token-using-rest-api
+function Get-IngestScriptWindows {
+    param (
+        [bool]$isArcConnectedMachine,
+        [string]$scriptStorageAccount,
+        [string]$LogFilePath,
+        [string]$tableName,
+        [string]$dcrImmutableId,
+        [string]$dceEndpointId,
+        [string]$timestampColumn,
+        [string]$timespan,
+        [string]$scriptContainerName,
+        [string]$workspaceId,
+        [string]$VMName
+    )
+
+    if ($isArcConnectedMachine -eq $true) {
+        $imdsHost = "localhost:40342"
+    }
+    else {
+        $imdsHost = "169.254.169.254"
+    }
+    
+    $script = @"
+echo "Part I Get Access Token"
+`$API_VERSION = "2020-06-01"
+`$RESOURCE = "https://storage.azure.com/"
+`$IDENTITY_ENDPOINT = "http://$imdsHost/metadata/identity/oauth2/token"
+`$ENDPOINT = "`${IDENTITY_ENDPOINT}?resource=`$RESOURCE&api-version=`$API_VERSION"
+"@
+
+    # this ensures the next chunk starts on a new line
+    $script += "`n"
+
+    if ($isArcConnectedMachine -eq $true) {
+        $script += @"
+try { (Invoke-WebRequest -Uri `$ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { `$WWW_AUTH_HEADER = $_.Exception.Response.Headers['WWW-Authenticate'] }
+`$SECRET_FILE = (`$WWW_AUTH_HEADER -split 'Basic realm=')[1] -replace "`r$",""
+if (-not (Test-Path `$SECRET_FILE)) { Write-Output "Error 2"; exit 1 }
+`$SECRET=`$(cat "`$SECRET_FILE")
+`$RESPONSE = Invoke-WebRequest -Method Get -Uri `$ENDPOINT -Headers @{Metadata='True'; Authorization="Basic `$SECRET"} -UseBasicParsing
+"@
+    }
+    else {
+        $script += @"
+`$RESPONSE = Invoke-WebRequest -Method Get -Uri `$ENDPOINT -Headers @{Metadata='True'} -UseBasicParsing
+"@
+    }
+
+    # this ensures the next chunk starts on a new line
+    $script += "`n"
+
+    $script += @"
+ACCESS_TOKEN = (ConvertFrom-Json -InputObject `$RESPONSE.Content).access_token
+if (-not `$env:ACCESS_TOKEN) { Write-Output "Error 003 `$env:RESPONSE"; exit 1 }
+echo "Part II Download script"
+`$STORAGE_ACCOUNT = "$scriptStorageAccount"
+`$CONTAINER_NAME = "$scriptContainerName"
+`$SOURCE_LOG_FILE = "$LogFilePath"
+`$TARGET_TABLE = "$tableName"
+`$DCR_IMMUTABLE_ID = "$dcrImmutableId"
+`$ENDPOINT_URI = "$dceEndpointId"
+`$TIMESTAMP_COLUMN = "$timestampColumn"
+`$TIME_SPAN = "$timespan"
+`$BLOB_NAME = "waitForLogsAndIngest.sh"
+`$LOCAL_FILE = "waitForLogsAndIngest.sh"
+`$WORKSPACE_ID = "$workspaceId"
+`$COMPUTER_NAME = "$VMName"
+`$IS_ARC_CONNECTED_MACHINE = "$isArcConnectedMachine"
+`$LOG_BLOB_NAME = "`$BLOB_NAME -replace '\.sh$', '') + '.log'
+`$BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${BLOB_NAME}"
+Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -OutFile `$LOCAL_FILE
+& "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" > "`$LOG_BLOB_NAME"
+echo "Part III Upload log file"
+`$LOG_BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${LOG_BLOB_NAME}"
+Invoke-WebRequest -Uri `$LOG_BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02"; "x-ms-blob-type" = "BlockBlob" } -Method Put -InFile "`$LOG_BLOB_NAME"
+"@
+
+    return $script
+}
+
+# Get-IngestScript helper to choose Linux or Windows version
+function Get-IngestScript {
+    param (
+        [bool]$isArcConnectedMachine,
+        [string]$scriptStorageAccount,
+        [string]$LogFilePath,
+        [string]$tableName,
+        [string]$dcrImmutableId,
+        [string]$dceEndpointId,
+        [string]$timestampColumn,
+        [string]$timespan,
+        [string]$scriptContainerName,
+        [string]$workspaceId,
+        [string]$VMName,
+        [bool]$isLinuxVm
+    )
+
+    if ($isLinuxVm -eq $true) {
+        return Get-IngestScriptLinux `
+            -isArcConnectedMachine $isArcConnectedMachine `
+            -scriptStorageAccount $scriptStorageAccount `
+            -LogFilePath $LogFilePath `
+            -tableName $tableName `
+            -dcrImmutableId $dcrImmutableId `
+            -dceEndpointId $dceEndpointId `
+            -timestampColumn $timestampColumn `
+            -timespan $timespan `
+            -scriptContainerName $scriptContainerName `
+            -workspaceId $workspaceId `
+            -VMName $VMName
+    }
+    else {
+        return Get-IngestScriptWindows `
+            -isArcConnectedMachine $isArcConnectedMachine `
+            -scriptStorageAccount $scriptStorageAccount `
+            -LogFilePath $LogFilePath `
+            -tableName $tableName `
+            -dcrImmutableId $dcrImmutableId `
+            -dceEndpointId $dceEndpointId `
+            -timestampColumn $timestampColumn `
+            -timespan $timespan `
+            -scriptContainerName $scriptContainerName `
+            -workspaceId $workspaceId `
+            -VMName $VMName
+    }
+}
+
+
 # start an async run-command to monitor the target table and ingest any missing log file entries
 function RunCommandAsyncToIngestMissingLogs {
     param (
@@ -436,7 +566,8 @@ function RunCommandAsyncToIngestMissingLogs {
         [string]$workspaceId,
         [string]$tableName,
         [string]$timestampColumn,
-        [string]$timespan
+        [string]$timespan,
+        [bool]$isLinuxVm
     )
 
     # TODO implement the function to run a command asynchronously to monitor the target table and ingest any missing log file entries
@@ -470,7 +601,8 @@ function RunCommandAsyncToIngestMissingLogs {
         -timespan $timespan `
         -scriptContainerName $scriptContainerName `
         -workspaceId $workspaceId `
-        -VMName $VMName
+        -VMName $VMName `
+        -isLinuxVm $isLinuxVm
 
     $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
@@ -502,7 +634,9 @@ function main {
         [Parameter(Mandatory = $true)]
         [array]$VmList,
         [Parameter(Mandatory = $true)]
-        [System.Boolean]$IsArcConnectedMachine
+        [System.Boolean]$IsArcConnectedMachine,
+        [Parameter(Mandatory = $true)]
+        [System.Boolean]$IsLinuxVm
     )
 
 
@@ -635,7 +769,8 @@ function main {
                     -WorkspaceId $workspaceId `
                     -tableName $tableName `
                     -timestampColumn "TimeGenerated" `
-                    -timespan "P1D" 
+                    -timespan "P1D" `
+                    -isLinuxVm $IsLinuxVm 
                 }
             }
         }
@@ -643,9 +778,9 @@ function main {
 }
 
 # entry point for Azure Linux VMs
-#main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false
+#main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false -IsLinuxVm $true
 
 # Entry point for Arc Linux VMs
-main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true
+main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true -IsLinuxVm $true
 
 
