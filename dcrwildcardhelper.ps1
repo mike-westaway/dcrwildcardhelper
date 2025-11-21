@@ -64,12 +64,22 @@ $azureLinuxVMs = ,@(
 function Convert-SplunkWildcardToRegex {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Pattern
+        [string]$Pattern,
+        [Parameter(Mandatory = $true)]
+        [bool]$IsLinuxVm = $true
     )
 
     # Replace escaped Splunk wildcards with regex equivalents
     $regexPattern = $Pattern -replace '\.\.\.', '.*'      # '...' → '.*'
-    $regexPattern = $regexPattern -replace '\*', '[^/]+'      # '*' → '[^/]+'
+
+    if ($IsLinuxVm -eq $true) {
+        $regexPattern = $regexPattern -replace '\*', '[^/]+'      # '*' → '[^/]+'
+    }
+    else {
+        # double backslashes for Windows
+        $regexPattern = $regexPattern -replace '\\', '\\'      # '\' → '\\'
+        $regexPattern = $regexPattern -replace '\*', '[^\\]+'      # '*' → '[^/]+'
+    }
 
     # Return the final regex pattern
     return $regexPattern
@@ -82,7 +92,7 @@ function Get-DcrNameFromWildcard {
         [string]$WildcardPathname
     )
 
-    $dcrName = $WildcardPathname -replace '[\*\?\[\]\^\./]', '_'
+    $dcrName = $WildcardPathname -replace '[\*\?\[\]\^\.\:\\/]', '_'
     $dcrName = "dcr_" + $dcrName
     return $dcrName
 }
@@ -297,11 +307,20 @@ function New-DcrFromWildcard {
 # example: Get-AnchorFromWildcard -SplunkWildcardPathname "/home/*/.bash_history" returns "/home"
 function Get-AnchorFromWildcard {
     param (
-        [string]$SplunkWildcardPathname
+        [string]$SplunkWildcardPathname,
+        [bool]$IsLinuxVm
     )
 
     # Build an "anchor": everything before the first segment that contains a wildcard (* ? [)
-    $segments = $SplunkWildcardPathname -split '/'
+    if ($IsLinuxVm -eq $true) {
+        # Convert Windows path to use '/' for easier processing
+        $segments = $SplunkWildcardPathname -split '/'
+    }
+    else {
+        # Ensure Windows path uses '\' (it should already)
+       $segments = $SplunkWildcardPathname -split '\\'
+    }
+    
     $anchorSegments = @()
     $sawWildcard = $false
     foreach ($seg in $segments) {
@@ -309,11 +328,16 @@ function Get-AnchorFromWildcard {
         if ($seg -ne '') { $anchorSegments += $seg }
     }
 
-    # If the pattern starts with '/', keep it in the anchor for correct matching
-    $leadingSlash = $SplunkWildcardPathname.StartsWith('/')
+    if ($IsLinuxVm) {
+        # If the pattern starts with '/', keep it in the anchor for correct matching
+        $leadingSlash = $SplunkWildcardPathname.StartsWith('/')
 
-    $anchor = ($anchorSegments -join '/')
-    if ($leadingSlash) { $anchor = "/$anchor" }
+        $anchor = ($anchorSegments -join '/')
+        if ($leadingSlash) { $anchor = "/$anchor" }
+    }
+    else {
+        $anchor = ($anchorSegments -join '\')
+    }
 
     return $anchor
 }
@@ -325,15 +349,21 @@ function Get-AnchorFromWildcard {
 function Get-FirstDcrFilePattern { 
     param (
         [string]$Folder,
-        [array]$splunkWildcardPaths
+        [array]$splunkWildcardPaths,
+        [bool]$IsLinuxVm
     )
 
     foreach ($item in $splunkWildcardPaths) {
         # eg '/var/.../*.log' becomes '/var/.*/[^/]+.log'
-        $regexPattern = Convert-SplunkWildcardToRegex -Pattern $item
+        $regexPattern = Convert-SplunkWildcardToRegex -Pattern $item -IsLinuxVm $IsLinuxVm
 
         # eg '/*.log'
-        $splunkPatternFileName = $item.Substring($item.LastIndexOf('/'))
+        if ($IsLinuxVm -eq $true) {
+            $splunkPatternFileName = $item.Substring($item.LastIndexOf('/'))
+        }
+        else {
+            $splunkPatternFileName = $item.Substring($item.LastIndexOf('\'))
+        }
 
         # eg '/var/log' + '/*.log'
         $dcrFilePattern = $Folder + $splunkPatternFileName
@@ -472,7 +502,7 @@ echo "Part I Get Access Token"
 
     if ($isArcConnectedMachine -eq $true) {
         $script += @"
-try { (Invoke-WebRequest -Uri `$ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { `$WWW_AUTH_HEADER = $_.Exception.Response.Headers['WWW-Authenticate'] }
+try { (Invoke-WebRequest -Uri `$ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { `$WWW_AUTH_HEADER = `$_.Exception.Response.Headers['WWW-Authenticate'] }
 `$SECRET_FILE = (`$WWW_AUTH_HEADER -split 'Basic realm=')[1] -replace "`r$",""
 if (-not (Test-Path `$SECRET_FILE)) { Write-Output "Error 2"; exit 1 }
 `$SECRET=`$(cat "`$SECRET_FILE")
@@ -489,8 +519,8 @@ if (-not (Test-Path `$SECRET_FILE)) { Write-Output "Error 2"; exit 1 }
     $script += "`n"
 
     $script += @"
-ACCESS_TOKEN = (ConvertFrom-Json -InputObject `$RESPONSE.Content).access_token
-if (-not `$env:ACCESS_TOKEN) { Write-Output "Error 003 `$env:RESPONSE"; exit 1 }
+`$ACCESS_TOKEN = (ConvertFrom-Json -InputObject `$RESPONSE.Content).access_token
+if ([string]::IsNullOrWhiteSpace(`$ACCESS_TOKEN)) { Write-Output "Error 003 `$env:RESPONSE"; exit 1 }
 echo "Part II Download script"
 `$STORAGE_ACCOUNT = "$scriptStorageAccount"
 `$CONTAINER_NAME = "$scriptContainerName"
@@ -507,7 +537,7 @@ echo "Part II Download script"
 `$IS_ARC_CONNECTED_MACHINE = "$isArcConnectedMachine"
 `$SLEEP_TIME = "$sleepTime"
 `$MAX_RETRIES = "$maxRetries"
-`$LOG_BLOB_NAME = "`$BLOB_NAME -replace '\.ps1$', '') + '.log'
+`$LOG_BLOB_NAME = (`$BLOB_NAME -replace '\.ps1$', '') + '.log'
 `$BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${BLOB_NAME}"
 Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -OutFile `$LOCAL_FILE
 & "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" -sleepTime "`$SLEEP_TIME" -maxRetries "`$MAX_RETRIES" > "`$LOG_BLOB_NAME"
@@ -566,6 +596,96 @@ function Get-IngestScript {
     }
 }
 
+
+# Execute a run command on a VM based on whether it's Arc-connected and Linux/Windows
+function RunCommand {
+    param (
+        [string]$ResourceGroupName,
+        [string]$VMName,
+        [string]$ScriptString,
+        [bool]$IsArcConnectedMachine,
+        [bool]$IsLinuxVm,
+        [bool]$IsAsync = $false
+    )
+
+    # Create a key combining all three boolean states
+    $caseKey = "$IsArcConnectedMachine-$IsLinuxVm-$IsAsync"
+
+    switch ($caseKey) {
+        # Arc + Linux + Async
+        "True-True-True" {
+            $result = New-AzConnectedMachineRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -MachineName $VMName `
+                -Location $dcrLocation `
+                -RunCommandName "ArcRunCmd" `
+                -SourceScript $ScriptString `
+                -AsJob
+        }
+        # Arc + Linux + Sync
+        "True-True-False" {
+            $result = Invoke-AzConnectedMachineRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -MachineName $VMName `
+                -CommandId 'RunShellScript' `
+                -ScriptString $ScriptString
+        }
+        # Arc + Windows + Async
+        "True-False-True" {
+            $result = New-AzConnectedMachineRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -MachineName $VMName `
+                -Location $dcrLocation `
+                -RunCommandName "ArcRunCmd" `
+                -SourceScript $ScriptString `
+                -AsJob
+        }
+        # Arc + Windows + Sync
+        "True-False-False" {
+            $result = Invoke-AzConnectedMachineRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -MachineName $VMName `
+                -CommandId 'RunPowerShellScript' `
+                -ScriptString $ScriptString
+        }
+        # Azure VM + Linux + Async
+        "False-True-True" {
+            $result = Invoke-AzVMRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -VMName $VMName `
+                -CommandId 'RunShellScript' `
+                -ScriptString $ScriptString `
+                -AsJob
+        }
+        # Azure VM + Linux + Sync
+        "False-True-False" {
+            $result = Invoke-AzVMRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -VMName $VMName `
+                -CommandId 'RunShellScript' `
+                -ScriptString $ScriptString
+        }
+        # Azure VM + Windows + Async
+        "False-False-True" {
+            $result = Invoke-AzVMRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -VMName $VMName `
+                -CommandId 'RunPowerShellScript' `
+                -ScriptString $ScriptString `
+                -AsJob
+        }
+        # Azure VM + Windows + Sync
+        "False-False-False" {
+            $result = Invoke-AzVMRunCommand `
+                -ResourceGroupName $ResourceGroupName `
+                -VMName $VMName `
+                -CommandId 'RunPowerShellScript' `
+                -ScriptString $ScriptString
+        }
+    }
+
+    return $result
+}
 
 # start an async run-command to monitor the target table and ingest any missing log file entries
 function RunCommandAsyncToIngestMissingLogs {
@@ -627,23 +747,13 @@ function RunCommandAsyncToIngestMissingLogs {
 
     $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
-    if ($isArcConnectedMachine -eq $true) {
-        $job = New-AzConnectedMachineRunCommand `
-            -ResourceGroupName $ResourceGroupName `
-            -MachineName $VMName `
-            -Location $dcrLocation `
-            -RunCommandName "ArcRunCmd" `
-            –SourceScript $scriptOneLine `
-            -AsJob
-    }
-    else {
-        $job = Invoke-AzVMRunCommand `
+    $job = RunCommand `
         -ResourceGroupName $ResourceGroupName `
         -VMName $VMName `
-        -CommandId 'RunShellScript' `
-        -ScriptString $scriptOneLine  `
-        -AsJob
-    }
+        -ScriptString $scriptOneLine `
+        -IsArcConnectedMachine $isArcConnectedMachine `
+        -IsLinuxVm $isLinuxVm `
+        -IsAsync $true
 
     Write-Host "Started async job for pre ingestion with ID: $($job.Id)" -ForegroundColor Blue
 }
@@ -673,10 +783,20 @@ function main {
 
         Write-Host "Processing Azure Windows VM: $machine in Resource Group: $resourceGroup under Subscription: $subscriptionId" -ForegroundColor Green
 
+        $cmdTemplateLinux = 'find $anchor -wholename "$path" $pipeline'
+        $cmdTemplateWindows = 'Get-ChildItem -Path $anchor -Recurse -Force | Where-Object { $_.FullName -like "$path" } | Select-Object -ExpandProperty FullName'
+
+        if ($IsLinuxVm -eq $false) {
+            $cmdTemplate = $cmdTemplateWindows
+        }
+        else {
+            $cmdTemplate = $cmdTemplateLinux
+        }
+
         # make big command as run-command is expensive, so do once per server
         $cmds = ""
         foreach ($wildcardPath in $SplunkWildcardPaths) {
-            $anchor = Get-AnchorFromWildcard -SplunkWildcardPathname $splunkWildcardPaths
+            $anchor = Get-AnchorFromWildcard -SplunkWildcardPathname $wildcardPath -IsLinuxVm $IsLinuxVm
             # if path contains a wildcard then use dirname to return the folder name only
             # else we already have the folder name eg /etc
             if ($wildcardPath -match '[\*\?\[\.]') {
@@ -685,7 +805,7 @@ function main {
             else {
                 $pipeline = "| sort -u"
             }
-            $cmd = 'find $anchor -wholename "$path" $pipeline' `
+            $cmd = $cmdTemplate `
                 -replace '\$anchor', $anchor `
                 -replace '\$path', $wildcardPath `
                 -replace '\$pipeline', $pipeline
@@ -707,11 +827,13 @@ function main {
                 $maxRetries = 3
             }
             else {
-                $result = Invoke-AzVMRunCommand `
+                $result = RunCommand `
                     -ResourceGroupName $resourceGroup `
                     -VMName $machine `
-                    -CommandId 'RunShellScript' `
-                    -ScriptString $cmds              }
+                    -ScriptString $cmds `
+                    -IsArcConnectedMachine $IsArcConnectedMachine `
+                    -IsLinuxVm $IsLinuxVm
+            }
     
         }
         catch {
@@ -732,13 +854,17 @@ function main {
 
         foreach ($folder in $resultArrUnique) {
 
-            # filter out any non-linux folder paths
-            if ($folder -notlike "/*") {
-                continue
+            if ($IsLinuxVm -eq $false) {
+                # filter out any non-windows folder paths
+                if ($folder -notmatch "^[a-zA-Z]:\\") { continue }
+            }
+            else {
+                # filter out any non-linux folder paths
+                if ($folder -notlike "/*") { continue }
             }
 
             # lookup the first wildcard pattern and type associated with this folder
-            $dcrFilePattern = Get-FirstDcrFilePattern -Folder $folder -splunkWildcardPaths $splunkWildcardPaths
+            $dcrFilePattern = Get-FirstDcrFilePattern -Folder $folder -splunkWildcardPaths $splunkWildcardPaths -IsLinuxVm $IsLinuxVm
 
             # if no matches log the error and continue
             if ($null -eq $dcrFilePattern) {
