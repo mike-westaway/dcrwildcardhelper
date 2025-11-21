@@ -24,7 +24,8 @@ $linuxArcSplunkWildcardPatterns = @(
 )
 
 # Define the Windows paths
-$windowsPaths = @(
+$windowsArcSplunkWildcardPatterns = @(
+    "C:\ProgramData\AzureConnectedMachineAgent\Log\arcproxy*.log"
 )
 
 # location for the DCRs
@@ -33,6 +34,17 @@ $dcrLocation = "uksouth"
 $scriptStorageAccount = "arcserversukssa"
 # container name for scripts and script logs
 $scriptContainerName = "scripts"
+
+# TODO make this a parameter
+$dcrResourceGroup = "arc-servers-uks"
+
+$sleepTime = 60       # seconds to wait between retries
+$maxRetries = 30      # max number of retries
+
+# SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
+$arcWindowsVMs = ,@(
+    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "My-Sql-Server", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")    
+)
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
 $arcLinuxVMs = ,@(
@@ -48,9 +60,6 @@ $azureWindowsVMs = ,@(
 $azureLinuxVMs = ,@(
     @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "jumpbox-linux-uks", "jumpbox-linux", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")    
 )
-
-# TODO make this a parameter
-$dcrResourceGroup = "arc-servers-uks"
 
 function Convert-SplunkWildcardToRegex {
     param (
@@ -350,7 +359,9 @@ function Get-IngestScriptLinux {
         [string]$timespan,
         [string]$scriptContainerName,
         [string]$workspaceId,
-        [string]$VMName
+        [string]$VMName,
+        [int]$sleepTime,
+        [int]$maxRetries
     )
 
     if ($isArcConnectedMachine -eq $true) {
@@ -406,11 +417,13 @@ local_file="waitForLogsAndIngest.sh"
 workspace_id=$workspaceId
 computer_name=$VMName
 is_arc_connected_machine=$isArcConnectedMachine
+sleep_time=$sleepTime
+max_retries=$maxRetries
 blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${blob_name}"
 curl -H "Authorization: Bearer `$ACCESS_TOKEN" -H "x-ms-version: 2020-10-02" "`$blob_url" -o "`$local_file"
 chmod +x "`$local_file"
 sed -i 's/\r$//' "./`$local_file"
-bash "./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$is_arc_connected_machine > "`${local_file%.sh}.log" 2>&1
+bash "./`$local_file" `$workspace_id `$computer_name `$source_log_file `$target_table `$dcr_immutable_id `$endpoint_uri `$timestamp_column `$time_span `$is_arc_connected_machine `$sleep_time `$max_retries > "`${local_file%.sh}.log" 2>&1
 echo "Part III Upload log file"
 log_blob_name="`${blob_name%.sh}.log"
 log_blob_url="https://`${storage_account}.blob.core.windows.net/`${container_name}/`${log_blob_name}"
@@ -434,7 +447,9 @@ function Get-IngestScriptWindows {
         [string]$timespan,
         [string]$scriptContainerName,
         [string]$workspaceId,
-        [string]$VMName
+        [string]$VMName,
+        [int]$sleepTime,
+        [int]$maxRetries
     )
 
     if ($isArcConnectedMachine -eq $true) {
@@ -490,10 +505,12 @@ echo "Part II Download script"
 `$WORKSPACE_ID = "$workspaceId"
 `$COMPUTER_NAME = "$VMName"
 `$IS_ARC_CONNECTED_MACHINE = "$isArcConnectedMachine"
+`$SLEEP_TIME = "$sleepTime"
+`$MAX_RETRIES = "$maxRetries"
 `$LOG_BLOB_NAME = "`$BLOB_NAME -replace '\.ps1$', '') + '.log'
 `$BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${BLOB_NAME}"
 Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -OutFile `$LOCAL_FILE
-& "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" > "`$LOG_BLOB_NAME"
+& "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" -sleepTime "`$SLEEP_TIME" -maxRetries "`$MAX_RETRIES" > "`$LOG_BLOB_NAME"
 echo "Part III Upload log file"
 `$LOG_BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${LOG_BLOB_NAME}"
 Invoke-WebRequest -Uri `$LOG_BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02"; "x-ms-blob-type" = "BlockBlob" } -Method Put -InFile "`$LOG_BLOB_NAME"
@@ -567,7 +584,9 @@ function RunCommandAsyncToIngestMissingLogs {
         [string]$tableName,
         [string]$timestampColumn,
         [string]$timespan,
-        [bool]$isLinuxVm
+        [bool]$isLinuxVm,
+        [int]$sleepTime,
+        [int]$maxRetries
     )
 
     # TODO implement the function to run a command asynchronously to monitor the target table and ingest any missing log file entries
@@ -602,7 +621,9 @@ function RunCommandAsyncToIngestMissingLogs {
         -scriptContainerName $scriptContainerName `
         -workspaceId $workspaceId `
         -VMName $VMName `
-        -isLinuxVm $isLinuxVm
+        -isLinuxVm $isLinuxVm `
+        -sleepTime $sleepTime `
+        -maxRetries $maxRetries
 
     $scriptOneLine = ($script -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) -join ";"
 
@@ -676,10 +697,14 @@ function main {
         $result = $null
         try {
             if ($IsTestingMode) {
-                # Azure test case
+                # Azure Linux test case
                 #$resultArr = ,@('/var/log')
-                # Arc Test Case
-                $resultArr = ,@('/var/log/azure/run-command-handler')
+                # Arc Linux Test Case
+                #$resultArr = ,@('/var/log/azure/run-command-handler')
+                # Arc Windows Text case
+                $resultArr = ,@('C:\ProgramData\AzureConnectedMachineAgent\Log')
+                $sleepTime = 10
+                $maxRetries = 3
             }
             else {
                 $result = Invoke-AzVMRunCommand `
@@ -770,7 +795,9 @@ function main {
                     -tableName $tableName `
                     -timestampColumn "TimeGenerated" `
                     -timespan "P1D" `
-                    -isLinuxVm $IsLinuxVm 
+                    -isLinuxVm $IsLinuxVm `
+                    -sleepTime $sleepTime `
+                    -maxRetries $maxRetries `
                 }
             }
         }
@@ -781,6 +808,8 @@ function main {
 #main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false -IsLinuxVm $true
 
 # Entry point for Arc Linux VMs
-main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true -IsLinuxVm $true
+#main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true -IsLinuxVm $true
 
+# Entry point for Arc Windows VMs
+main -SplunkWildcardPaths $windowsArcSplunkWildcardPatterns -VmList $arcWindowsVMs -IsArcConnectedMachine $true -IsLinuxVm $false
 

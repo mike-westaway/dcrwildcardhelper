@@ -260,6 +260,8 @@ endpointUri=$6
 timestampColumn=$7
 timeSpan=$8
 isArcConnectedMachine=$9
+sleepTime=$10 # eg "60" seconds
+maxRetries=$11 # eg "30"
 
 script_name=$(basename "$0")                # Get current script name
 logFilePath="${script_name%.*}.log" 
@@ -280,12 +282,12 @@ while true; do
         echo "Got result: $timestamp"
         break
     else
-        echo "Result was empty, retrying in 60 seconds..."
-        sleep 60  # try again in 60 seconds
-        # if we have no result after 30 attempts then exit with an error
+        echo "Result was empty, retrying in $sleepTime seconds..."
+        sleep $sleepTime  # try again in $sleepTime seconds
+        # if we have no result after $maxRetries attempts then exit with an error
         ((attempts++))
-        if [[ $attempts -ge 30 ]]; then
-            echo "Failed to get result after 30 attempts, exiting with error."
+        if [[ $attempts -ge $maxRetries ]]; then
+            echo "Failed to get result after $maxRetries attempts, exiting with error."
             exit 1
         fi
     fi

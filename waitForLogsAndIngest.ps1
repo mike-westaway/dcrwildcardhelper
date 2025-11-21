@@ -9,7 +9,9 @@ param(
     [string]$endpointUri,
     [string]$timestampColumn,
     [string]$timeSpan,
-    [string]$isArcConnectedMachine
+    [string]$isArcConnectedMachine,
+    [int]$sleepTime,
+    [int]$maxRetries
 )
 
 function Get-EarliestTimestamp {
@@ -160,11 +162,11 @@ while ($true) {
         Write-Host "Got result: $timestamp"
         break
     } else {
-        Write-Host "Result was empty, retrying in 60 seconds..."
-        Start-Sleep -Seconds 60
+        Write-Host "Result was empty, retrying in $sleepTime seconds..."
+        Start-Sleep -Seconds $sleepTime
         $attempts++
-        if ($attempts -ge 30) {
-            Write-Host "Failed to get result after 30 attempts, exiting with error."
+        if ($attempts -ge $maxRetries) {
+            Write-Host "Failed to get result after $maxRetries attempts, exiting with error."
             exit 1
         }
     }
