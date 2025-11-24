@@ -1,9 +1,9 @@
 & ./waitForLogsAndIngest.ps1 `
     -workspaceId b5b2874f-f4fb-4581-b606-af3b15af8fea `
     -computerName LAPTOP-JF9KNPOJ `
-    -sourceLogFile C:/ProgramData/AzureConnectedMachineAgent/Log/arcproxy.log `
-    -targetTable LinuxTextLogs2_CL `
-    -dcrImmutableId dcr-d14c760418244661b683391a0022de18 `
+    -sourceLogFile 'C:\Logs\SampleLogFile.log' `
+    -targetTable 'WindowsCustTxt_CL' `
+    -dcrImmutableId dcr-6a7cfef89ab54259a34f8dc0070ec9fc `
     -endpointUri https://arc-servers-uks-endpoint-5lkb.uksouth-1.ingest.monitor.azure.com `
     -timestampColumn TimeGenerated `
     -timeSpan P1D `
