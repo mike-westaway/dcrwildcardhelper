@@ -25,7 +25,7 @@ $linuxArcSplunkWildcardPatterns = @(
 
 # Define the Windows paths
 $windowsArcSplunkWildcardPatterns = @(
-    "C:\ProgramData\AzureConnectedMachineAgent\Log\arcproxy*.log"
+    "C:\Logs\Sample*.log"
 )
 
 # location for the DCRs
@@ -43,7 +43,7 @@ $maxRetries = 30      # max number of retries
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
 $arcWindowsVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "My-Sql-Server", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")    
+    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "My-Sql-Server", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "WindowsCustTxt_CL")    
 )
 
 # SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
@@ -94,6 +94,7 @@ function Get-DcrNameFromWildcard {
 
     $dcrName = $WildcardPathname -replace '[\*\?\[\]\^\.\:\\/]', '_'
     $dcrName = "dcr_" + $dcrName
+
     return $dcrName
 }
 
@@ -101,7 +102,8 @@ function Get-DcrNameFromWildcard {
 function Get-DcrFolderPath {
     param (
         [string]$VmResourceId,
-        [string]$Folder
+        [string]$Folder,
+        [bool]$IsLinuxVm = $true
     )
 
     $retDcrFolderPath = $null
@@ -117,6 +119,13 @@ function Get-DcrFolderPath {
             continue
         }
 
+        if ($IsLinuxVm -eq $true) {
+            $folderSeparator = "/"
+        }
+        else {
+            $folderSeparator = "\"  
+        }
+
         $dcr = Get-AzResource -ResourceId $dcrId
 
         # Get the Data Sources from the DCR   
@@ -130,7 +139,7 @@ function Get-DcrFolderPath {
                 # if there are wildcards in the pattern then extract the folder part
                 # else the pattern is a folder only
                 if ($filePattern -match '[\*\?\[\.]') {
-                    $retDcrFolderPath = $filePattern.Substring(0, $filePattern.LastIndexOf('/'))
+                    $retDcrFolderPath = $filePattern.Substring(0, $filePattern.LastIndexOf($folderSeparator))
                 }
                 else {
                     $retDcrFolderPath = $filePattern
@@ -139,7 +148,10 @@ function Get-DcrFolderPath {
                 if ($retDcrFolderPath -eq $Folder) {
                     Write-Host "Found matching DCR File Pattern" -ForegroundColor Green
                     return $retDcrFolderPath
-                }                       
+                }
+                else {                       
+                    $retDcrFolderPath = $null
+                }                      
             }
         }
     }
@@ -155,7 +167,21 @@ function New-DcrDataSourceAndAssociation {
         [Parameter(Mandatory = $true)]
         [string]$DcrFilePattern,
         [Parameter(Mandatory = $true)]
-        [string]$vmResourceId
+        [string]$vmResourceId,
+        [Parameter(Mandatory = $true)]
+        [bool]$IsLinuxVm,
+        [Parameter(Mandatory = $true)]
+        [string]$subscriptionId,
+        [Parameter(Mandatory = $true)]
+        [string]$dcrResourceGroup,
+        [Parameter(Mandatory = $true)]
+        [string]$dcrLocation,
+        [Parameter(Mandatory = $true)]
+        [string]$dceName,
+        [Parameter(Mandatory = $true)]
+        [string]$workspaceName,
+        [Parameter(Mandatory = $true)]
+        [string]$tableName
         )
 
     $retDcrResource = $null
@@ -176,7 +202,8 @@ function New-DcrDataSourceAndAssociation {
             -dceName $dceName `
             -customLogPath $dcrFilePattern `
             -tableName $tableName `
-            -workspaceName $workspaceName
+            -workspaceName $workspaceName `
+            -isLinuxVm $IsLinuxVm
 
         $retDcrResource = Get-AzResource -ResourceId $dcr.Id
     }
@@ -235,11 +262,18 @@ function New-DcrFromWildcard {
         [string]$dceName,
         [string]$customLogPath,
         [string]$tableName,
-        [string]$workspaceName
+        [string]$workspaceName,
+        [bool]$isLinuxVm
     )
 
     $dceId = "/subscriptions/$dcrSubscriptionId/resourceGroups/$dcrResourceGroupName/providers/Microsoft.Insights/dataCollectionEndpoints/$dceName"
-    $kind = "Linux"
+    
+    if ($isLinuxVm -eq $true) {
+        $kind = "Linux"
+    }
+    else {
+        $kind = "Windows"
+    }
 
     # Lookup Workspace Resource Id based on its Id
     $workspaceResourceId = "/subscriptions/$dcrSubscriptionId/resourcegroups/$dcrResourceGroupName/providers/microsoft.operationalinsights/workspaces/$workspaceName"
@@ -828,7 +862,7 @@ function main {
                 # Arc Linux Test Case
                 #$resultArr = ,@('/var/log/azure/run-command-handler')
                 # Arc Windows Text case
-                $resultArr = ,@('C:\ProgramData\AzureConnectedMachineAgent\Log')
+                $resultArr = ,@('C:\Logs')
                 $sleepTime = 10
                 $maxRetries = 3
             }
@@ -889,13 +923,23 @@ function main {
                 $vmResourceId = (Get-AzResource -ResourceGroupName $resourceGroup -ResourceName $machine -ResourceType "Microsoft.Compute/virtualMachines").ResourceId
             }
 
-            $dcrFolderPath = Get-DcrFolderPath -VmResourceId $vmResourceId -Folder $folder
+            $dcrFolderPath = Get-DcrFolderPath -VmResourceId $vmResourceId -Folder $folder -IsLinuxVm $IsLinuxVm
 
             if ($null -eq $dcrFolderPath) {
                 # lookup the Dcr Id based on the Resource Group and Name
                 $dcrName  = $(Get-DcrNameFromWildcard $dcrFilePattern)
 
-                $dcr = New-DcrDataSourceAndAssociation -DcrName $dcrName -DcrFilePattern $dcrFilePattern -vmResourceId $vmResourceId
+                $dcr = New-DcrDataSourceAndAssociation `
+                    -DcrName $dcrName `
+                    -DcrFilePattern $dcrFilePattern `
+                    -vmResourceId $vmResourceId `
+                    -IsLinuxVm $IsLinuxVm `
+                    -subscriptionId $subscriptionId `
+                    -dcrResourceGroup $dcrResourceGroup `
+                    -dcrLocation $dcrLocation `
+                    -dceName $dceName `
+                    -workspaceName $workspaceName `
+                    -tableName $tableName
 
                 if ($dcr) {
                     # lookup the workspace immutable id based on the name and resourcegroup
