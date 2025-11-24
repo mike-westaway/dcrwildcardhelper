@@ -1,2 +1,3 @@
 preflightchecks.sh
 preflightchecks.log
+waitForLogsAndIngest.log

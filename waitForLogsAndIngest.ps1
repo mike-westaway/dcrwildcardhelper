@@ -45,14 +45,20 @@ function Get-EarliestTimestamp {
     }
 
     $response = Invoke-RestMethod -Method Post -Uri "$resource/v1/workspaces/$workspaceId/query" -Headers $headers -Body $payload
-    $timestamp = $response.tables.rows[0][0]
+
+    if ([string]::IsNullOrEmpty($response.tables.rows)) {
+        $timestamp = $null
+    }
+    else {
+        $timestamp = $response.tables.rows[0][0]
+    }
 
     Add-Content -Path $logFile -Value "Access Token (trunc): $($accessToken.Substring(0,10))..."
     Add-Content -Path $logFile -Value "KQL Query: $kql"
     Add-Content -Path $logFile -Value "Payload: $payload"
     Add-Content -Path $logFile -Value "KQL Result: $($response | ConvertTo-Json)"
-    Add-Content -Path $logFile -Value "Earliest timestamp for $filePath on $computer is:"
-    Add-Content -Path $logFile -Value "$timestamp"
+    Add-Content -Path $logFile -Value "Earliest timestamp for $filePath on $computer"
+    Add-Content -Path $logFile -Value "Timestamp: $timestamp"
 
     return $timestamp
 }
@@ -112,8 +118,34 @@ function Log2Json {
 
 function Get-AccessTokenArc {
     param([string]$Resource)
-    # Implement the logic for Arc token retrieval here
-    throw "Get-AccessTokenArc not implemented in PowerShell. Use Azure CLI or REST API."
+
+    # Config
+    # This is the IMDS endpoint used by the System Managed Identity to get tokens
+    $API_VERSION = "2020-06-01"
+    $IDENTITY_ENDPOINT = "http://localhost:40342/metadata/identity/oauth2/token"
+    $ENDPOINT = "${IDENTITY_ENDPOINT}?resource=${Resource}&api-version=${API_VERSION}"
+
+    # Step 1: Make unauthenticated request to get WWW-Authenticate header
+    try { (Invoke-WebRequest -Uri $ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { $WWW_AUTH_HEADER = $_.Exception.Response.Headers.WwwAuthenticate }
+
+    # Step 2: Extract secret file path from header
+    $SECRET_FILE = ( $WWW_AUTH_HEADER -split 'Basic realm=')[1] -replace "`r$",""
+
+    # Step 3: Read secret
+    if (-not (Test-Path $SECRET_FILE)) { Write-Output "Error 2"; exit 1 }
+
+    # Need IMDS Group member or root permissions to read the secret file
+    $SECRET = $(cat "$SECRET_FILE")
+
+    # Step 4: Make authenticated request with Basic token
+    $RESPONSE = Invoke-WebRequest -Method Get -Uri $ENDPOINT -Headers @{Metadata='True'; Authorization="Basic $SECRET"} -UseBasicParsing
+
+    # Step 5: Extract access token
+    $ACCESS_TOKEN = (ConvertFrom-Json -InputObject $RESPONSE.Content).access_token
+
+    if ([string]::IsNullOrWhiteSpace($ACCESS_TOKEN)) { Write-Output "Error 003 $env:RESPONSE"; exit 1 }
+
+    return $ACCESS_TOKEN
 }
 
 function Get-AccessTokenAzure {
@@ -142,6 +174,7 @@ function IngestJson {
     $uri = "$endpointUri/dataCollectionRules/$dcrImmutableId/streams/$streamName?api-version=2023-01-01"
 
     Write-Host "IngestJson $dcrImmutableId $tableName $uri $jsonLogFile $isArcConnectedMachine $($token.Substring(0,10))"
+    
     Invoke-RestMethod -Method Post -Uri $uri -Headers @{
         "Content-Type" = "application/json"
         Authorization = "Bearer $token"
@@ -150,10 +183,10 @@ function IngestJson {
 
 # Main loop
 $scriptName = $MyInvocation.MyCommand.Name
-$logFilePath = "$($scriptName -replace '\\..*$', '').log"
+$logFilePath = $($scriptName -replace '\.ps1$', '') + '.log'
 $attempts = 0
 
-Write-Host "Script $scriptName started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan"
+Write-Host "Script $scriptName started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan, sleepTime=$sleepTime, maxRetries=$maxRetries"
 
 while ($true) {
     Write-Host "Attempt #$($attempts + 1) to get earliest timestamp..."
