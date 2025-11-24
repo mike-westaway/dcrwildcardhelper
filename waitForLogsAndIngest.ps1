@@ -22,18 +22,18 @@ function Get-EarliestTimestamp {
         [string]$filePath,
         [string]$timestampColumn,
         [string]$timeSpan,
-        [string]$logFile,
         [string]$isArcConnectedMachine
     )
 
+    # the '@' on FilePath is to escape any special characters in the KQL query, like '\' on Windows Paths
     $resource = "https://api.loganalytics.io"
-    $kql = "$table | where Computer == '$computer' | where FilePath == '$filePath' | summarize EarliestTimestamp=min($timestampColumn)"
+    $kql = "$table | where Computer == '$computer' | where FilePath == @'$filePath' | summarize EarliestTimestamp=min($timestampColumn)"
     $payload = @{
         query = $kql
         timespan = $timeSpan
     } | ConvertTo-Json
 
-    if ($isArcConnectedMachine -eq "true") {
+    if ($isArcConnectedMachine -ieq "true") {
         $accessToken = Get-AccessTokenArc -Resource $resource
     } else {
         $accessToken = Get-AccessTokenAzure -Resource $resource
@@ -53,21 +53,27 @@ function Get-EarliestTimestamp {
         $timestamp = $response.tables.rows[0][0]
     }
 
-    Add-Content -Path $logFile -Value "Access Token (trunc): $($accessToken.Substring(0,10))..."
-    Add-Content -Path $logFile -Value "KQL Query: $kql"
-    Add-Content -Path $logFile -Value "Payload: $payload"
-    Add-Content -Path $logFile -Value "KQL Result: $($response | ConvertTo-Json)"
-    Add-Content -Path $logFile -Value "Earliest timestamp for $filePath on $computer"
-    Add-Content -Path $logFile -Value "Timestamp: $timestamp"
+    Write-Host "Access Token (trunc): $($accessToken.Substring(0,10))..."
+    Write-Host "KQL Query: $kql"
+    Write-Host "Payload: $payload"
+    Write-Host "KQL Result: $($response | ConvertTo-Json)"
+    Write-Host "Earliest timestamp for $filePath on $computer"
+    Write-Host "Timestamp: $timestamp"
 
     return $timestamp
 }
 
+# Note that the Log Ingestion API does NOT call TransformKql from the Data Collection Rule
+# So we have to include said transformations here, namely:
+# Computer, FilePath
+# Note _ResourceId cannot be populated with Log Ingestion API
+# https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview
 function Log2Json {
     param(
         [string]$logFile,
         [string]$outputPrefix,
-        [string]$maximumTimestamp
+        [string]$maximumTimestamp,
+        [string]$computer
     )
 
     $maxSize = 1MB
@@ -75,6 +81,7 @@ function Log2Json {
     $fileIndex = 1
     $currentFile = "$outputPrefix" + "_$fileIndex.json"
     $returnArr = @($currentFile)
+    $textColumnDelimeter = ","
     Set-Content -Path $currentFile -Value "["
 
     $firstLine = $true
@@ -82,7 +89,7 @@ function Log2Json {
 
     Get-Content $logFile | ForEach-Object {
         $line = $_
-        $timestamp = $line.Split(" ")[0]
+        $timestamp = $line.Split($textColumnDelimeter)[0]
         $epochTimestamp = [datetime]::Parse($timestamp).ToUniversalTime().Ticks
         $epochMaximum = [datetime]::Parse($maximumTimestamp).ToUniversalTime().Ticks
 
@@ -90,7 +97,8 @@ function Log2Json {
         if ($epochTimestamp -ge $epochMaximum) { return }
 
         $rawData = $line -replace '"', '\"'
-        $jsonLine = " {`"TimeGenerated`": `"$timestamp`", `"RawData`": `"$rawData`"}"
+
+        $jsonLine = " {`"TimeGenerated`": `"$timestamp`", `"RawData`": `"$rawData`", `"FilePath`": `"$logFile`", `"Computer`": `"$computer`" } "
 
         if (-not $firstLine) {
             $jsonLine = ",$jsonLine"
@@ -126,7 +134,11 @@ function Get-AccessTokenArc {
     $ENDPOINT = "${IDENTITY_ENDPOINT}?resource=${Resource}&api-version=${API_VERSION}"
 
     # Step 1: Make unauthenticated request to get WWW-Authenticate header
-    try { (Invoke-WebRequest -Uri $ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { $WWW_AUTH_HEADER = $_.Exception.Response.Headers.WwwAuthenticate }
+    try { (Invoke-WebRequest -Uri $ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { $WWW_AUTH_HEADER = $_.Exception.Response.Headers.GetValues("WWW-Authenticate")}
+
+    Write-Host "Endpoint $ENDPOINT"
+    Write-Host "WWW $WWW_AUTH_HEADER"
+    Write-Host "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
 
     # Step 2: Extract secret file path from header
     $SECRET_FILE = ( $WWW_AUTH_HEADER -split 'Basic realm=')[1] -replace "`r$",""
@@ -171,7 +183,7 @@ function IngestJson {
     }
 
     $streamName = "Custom-Text-$tableName"
-    $uri = "$endpointUri/dataCollectionRules/$dcrImmutableId/streams/$streamName?api-version=2023-01-01"
+    $uri = "$endpointUri/dataCollectionRules/$dcrImmutableId/streams/${streamName}?api-version=2023-01-01"
 
     Write-Host "IngestJson $dcrImmutableId $tableName $uri $jsonLogFile $isArcConnectedMachine $($token.Substring(0,10))"
     
@@ -183,16 +195,17 @@ function IngestJson {
 
 # Main loop
 $scriptName = $MyInvocation.MyCommand.Name
-$logFilePath = $($scriptName -replace '\.ps1$', '') + '.log'
+
 $attempts = 0
 
 Write-Host "Script $scriptName started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan, sleepTime=$sleepTime, maxRetries=$maxRetries"
 
 while ($true) {
     Write-Host "Attempt #$($attempts + 1) to get earliest timestamp..."
-    $timestamp = Get-EarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $logFilePath $isArcConnectedMachine
+    $timestamp = Get-EarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $isArcConnectedMachine
+    $isoTimestampStr = $timestamp.ToString("o")
     if ($timestamp) {
-        Write-Host "Got result: $timestamp"
+        Write-Host "Got result: $isoTimestampStr"
         break
     } else {
         Write-Host "Result was empty, retrying in $sleepTime seconds..."
@@ -206,7 +219,7 @@ while ($true) {
 }
 
 # Convert logs to JSON format and return array of generated files
-$jsonFileArr = Log2Json $sourceLogFile $targetTable $timestamp
+$jsonFileArr = Log2Json $sourceLogFile $targetTable $isoTimestampStr $computerName
 
 # For each JSON file, ingest logs into Log Analytics Workspace table
 Write-Host "Ingesting logs into Log Analytics Workspace table..."
