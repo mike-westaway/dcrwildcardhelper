@@ -563,7 +563,9 @@ function Get-IngestScript {
         [string]$scriptContainerName,
         [string]$workspaceId,
         [string]$VMName,
-        [bool]$isLinuxVm
+        [bool]$isLinuxVm,
+        [int]$sleepTime,
+        [int]$maxRetries
     )
 
     if ($isLinuxVm -eq $true) {
@@ -578,7 +580,9 @@ function Get-IngestScript {
             -timespan $timespan `
             -scriptContainerName $scriptContainerName `
             -workspaceId $workspaceId `
-            -VMName $VMName
+            -VMName $VMName `
+            -sleepTime $sleepTime `
+            -maxRetries $maxRetries
     }
     else {
         return Get-IngestScriptWindows `
@@ -592,7 +596,9 @@ function Get-IngestScript {
             -timespan $timespan `
             -scriptContainerName $scriptContainerName `
             -workspaceId $workspaceId `
-            -VMName $VMName
+            -VMName $VMName `
+            -sleepTime $sleepTime `
+            -maxRetries $maxRetries
     }
 }
 
