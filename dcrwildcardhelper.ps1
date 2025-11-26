@@ -28,6 +28,8 @@ $windowsArcSplunkWildcardPatterns = @(
     "C:\Logs\Sample*.log"
 )
 
+$windowsAzureSplunkWildcardPatterns = $windowsArcSplunkWildcardPatterns;
+
 # location for the DCRs
 $dcrLocation = "uksouth"
 # storage account for scripts and script logs
@@ -41,25 +43,59 @@ $dcrResourceGroup = "arc-servers-uks"
 $sleepTime = 60       # seconds to wait between retries
 $maxRetries = 30      # max number of retries
 
-# SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
-$arcWindowsVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "My-Sql-Server", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "WindowsCustTxt_CL")    
-)
+# Function to read CSV and populate VM lists
+function Get-VMListsFromCSV {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$CsvPath
+    )
 
-# SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
-$arcLinuxVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "arc-servers-uks", "LAPTOP-JF9KNPOJ", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")
-)
+    # Initialize the four arrays
+    $arcWindowsVMs = @()
+    $arcLinuxVMs = @()
+    $azureWindowsVMs = @()
+    $azureLinuxVMs = @()
 
-# SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
-$azureWindowsVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "ai-foundry-byo-demo", "jumpbox", "arc-servers-uks-endpoint", "arc-servers-uks-law", "WindowsEvent_CL")    
-)
+    # Read the CSV file
+    $csvData = Import-Csv -Path $CsvPath
 
-# SubscrioptionId, ResourceGroup, VM Name, DCE Name, Workspace Name, Table Name
-$azureLinuxVMs = ,@(
-    @("862097ad-4b0b-4f09-b98c-bfd14930e1b4", "jumpbox-linux-uks", "jumpbox-linux", "arc-servers-uks-endpoint", "arc-servers-uks-law", "LinuxTextLogs2_CL")    
-)
+    foreach ($row in $csvData) {
+        # Create an array for this VM: SubscriptionId, ResourceGroup, VMName, DCEName, WorkspaceName, TableName
+        $vmEntry = @(
+            $row.SubscriptionId,
+            $row.ResourceGroup,
+            $row.VMName,
+            $row.DCEName,
+            $row.WorkspaceName,
+            $row.TableName
+        )
+
+        # Determine which list to add to based on IsArc and IsLinux columns
+        $isArc = [bool]::Parse($row.ArcAzure.Equals("Arc", [System.StringComparison]::OrdinalIgnoreCase))
+        $isDeviceWindows = [bool]::Parse($row.WindowsLinux.Equals("Windows", [System.StringComparison]::OrdinalIgnoreCase))
+
+        if ($isArc -and -not $isDeviceWindows) {
+            $arcLinuxVMs += ,@($vmEntry)
+        }
+        elseif ($isArc -and $isDeviceWindows) {
+            $arcWindowsVMs += ,@($vmEntry)
+        }
+        elseif (-not $isArc -and -not $isDeviceWindows) {
+            $azureLinuxVMs += ,@($vmEntry)
+        }
+        else {
+            $azureWindowsVMs += ,@($vmEntry)
+        }
+    }
+
+    # Return a hashtable with all four lists
+    return @{
+        ArcWindowsVMs = $arcWindowsVMs
+        ArcLinuxVMs = $arcLinuxVMs
+        AzureWindowsVMs = $azureWindowsVMs
+        AzureLinuxVMs = $azureLinuxVMs
+    }
+}
 
 function Convert-SplunkWildcardToRegex {
     param (
@@ -128,7 +164,12 @@ function Get-DcrFolderPath {
 
         $dcr = Get-AzResource -ResourceId $dcrId
 
-        # Get the Data Sources from the DCR   
+        # Get the Data Sources from the DCR  
+        if ($dcr.Properties.dataSources.PSObject.Properties.Name.Equals("logFiles") -eq $false) {
+            Write-Host "DCR $($dcr.Name) has no Log File Data Sources - skipping" -ForegroundColor Yellow
+            continue
+        }
+
         $logFileDataSourceArr = @($dcr.Properties.dataSources.logFiles) 
         
         foreach ($logFileDataSource in $logFileDataSourceArr) {
@@ -980,12 +1021,18 @@ function main {
     }
 }
 
+# read the configuration file
+$connectedMachinesAndVmsHash = Get-VMListsFromCSV -CsvPath ./connectedMachinesAndVms.csv
+
 # entry point for Azure Linux VMs
-#main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $azureLinuxVMs -IsArcConnectedMachine $false -IsLinuxVm $true
+#main -SplunkWildcardPaths $linuxAzureSplunkWildcardPatterns -VmList $connectedMachinesAndVmsHash["AzureLinuxVMs"] -IsArcConnectedMachine $false -IsLinuxVm $true
 
 # Entry point for Arc Linux VMs
-#main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $arcLinuxVMs -IsArcConnectedMachine $true -IsLinuxVm $true
+#main -SplunkWildcardPaths $linuxArcSplunkWildcardPatterns -VmList $connectedMachinesAndVmsHash["ArcLinuxVMs"]  -IsArcConnectedMachine $true -IsLinuxVm $true
 
 # Entry point for Arc Windows VMs
-main -SplunkWildcardPaths $windowsArcSplunkWildcardPatterns -VmList $arcWindowsVMs -IsArcConnectedMachine $true -IsLinuxVm $false
+#main -SplunkWildcardPaths $windowsArcSplunkWildcardPatterns -VmList $connectedMachinesAndVmsHash["ArcWindowsVMs"] -IsArcConnectedMachine $true -IsLinuxVm $false
+
+# Entry point for Arc Windows VMs
+main -SplunkWildcardPaths $windowsAzureSplunkWildcardPatterns -VmList $connectedMachinesAndVmsHash["AzureWindowsVMs"] -IsArcConnectedMachine $false -IsLinuxVm $false
 
