@@ -162,8 +162,24 @@ function Get-AccessTokenArc {
 
 function Get-AccessTokenAzure {
     param([string]$Resource)
-    # Implement the logic for Azure token retrieval here
-    throw "Get-AccessTokenAzure not implemented in PowerShell. Use Azure CLI or REST API."
+    # Config
+    # This is the IMDS endpoint used by the System Managed Identity to get tokens
+    $API_VERSION = "2020-06-01"
+    $imdsHost = "169.254.169.254"
+    $IDENTITY_ENDPOINT = "http://$imdsHost/metadata/identity/oauth2/token"
+    $ENDPOINT = "${IDENTITY_ENDPOINT}?resource=${Resource}&api-version=${API_VERSION}"
+
+    Write-Host "Endpoint $ENDPOINT"
+    Write-Host "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
+
+    $RESPONSE = Invoke-WebRequest -Method Get -Uri $ENDPOINT -Headers @{Metadata='True'} -UseBasicParsing
+
+    # Step 5: Extract access token
+    $ACCESS_TOKEN = (ConvertFrom-Json -InputObject $RESPONSE.Content).access_token
+
+    if ([string]::IsNullOrWhiteSpace($ACCESS_TOKEN)) { Write-Output "Error 003 $env:RESPONSE"; exit 1 }
+
+    return $ACCESS_TOKEN
 }
 
 function IngestJson {
