@@ -1,3 +1,4 @@
 preflightchecks.sh
-preflightchecks.log
-waitForLogsAndIngest.log
+*.json
+*.log
+connectedMachinesAndVms.csv
