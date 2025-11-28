@@ -200,6 +200,8 @@ function Get-DcrFolderPath {
     return $retDcrFolderPath
 }
 
+# this function will ensure the DCR, Data Sourc, File Pattern and DCR Association exist
+# it is possible that some of these objects exist already, so lots of checks to see what is missing and create only that part
 function New-DcrDataSourceAndAssociation {
     param (
         [Parameter(Mandatory = $false)]
@@ -259,30 +261,42 @@ function New-DcrDataSourceAndAssociation {
             # the Log Files data source already exists - recreate the object appending the new file pattern
             $exisitingDataSourceLogFiles = $dcrResource.Properties.dataSources.logFiles[0]
 
-            $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($DcrFilePattern)
+            if ($exisitingDataSourceLogFiles.filePatterns -contains $DcrFilePattern) {
+                Write-Host "DCR Data Source already contains File Pattern $DcrFilePattern - no update needed" -ForegroundColor Green
+            }
+            else {
+                $newFilePatterns = $exisitingDataSourceLogFiles.filePatterns + @($DcrFilePattern)
 
-            $dcrDataSource = New-AzLogFilesDataSourceObject `
-                -Name $exisitingDataSourceLogFiles.name  `
-                -FilePattern $newFilePatterns `
-                -Stream $exisitingDataSourceLogFiles.streams[0]
+                $dcrDataSource = New-AzLogFilesDataSourceObject `
+                    -Name $exisitingDataSourceLogFiles.name  `
+                    -FilePattern $newFilePatterns `
+                    -Stream $exisitingDataSourceLogFiles.streams[0]    
+                    
+                # attach this to the exisiting DCR
+                $null = Update-AzDataCollectionRule `
+                    -Name $dcrResource.Name `
+                    -ResourceGroupName $dcrResource.ResourceGroupName `
+                    -SubscriptionId $dcrResource.SubscriptionId `
+                    -DataSourceLogFile  $dcrDataSource 
+
+            }
         }
         else {
             $dcrDataSource = New-AzLogFilesDataSourceObject `
                 -Name $dataSourceName  `
                 -FilePattern $DcrFilePattern `
                 -Stream $incomingStream
-        }
 
-        # attach this to the exisiting DCR
-        $null = Update-AzDataCollectionRule `
-            -Name $dcrResource.Name `
-            -ResourceGroupName $dcrResource.ResourceGroupName `
-            -SubscriptionId $dcrResource.SubscriptionId `
-            -DataSourceLogFile  $dcrDataSource 
+            # attach this to the exisiting DCR
+            $null = Update-AzDataCollectionRule `
+                -Name $dcrResource.Name `
+                -ResourceGroupName $dcrResource.ResourceGroupName `
+                -SubscriptionId $dcrResource.SubscriptionId `
+                -DataSourceLogFile  $dcrDataSource 
+        }
             
         $retDcrResource = $dcrResource
     }
-
 
     # create the DCR Association
     $null = New-AzDataCollectionRuleAssociation `
