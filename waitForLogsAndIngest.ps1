@@ -14,6 +14,17 @@ param(
     [int]$maxRetries
 )
 
+$gblLogFile = [System.IO.Path]::ChangeExtension($MyInvocation.MyCommand.Name, '.log')
+
+function logMessage{
+    param(
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+    "[$timestamp] $message" | Out-File -FilePath $gblLogFile -Append
+}
+
+# TODO support returning an array of FilePaths and Timestamps, currently only the first is handled
 function Get-EarliestTimestamp {
     param(
         [string]$workspaceId,
@@ -25,13 +36,20 @@ function Get-EarliestTimestamp {
         [string]$isArcConnectedMachine
     )
 
-    # the '@' on FilePath is to escape any special characters in the KQL query, like '\' on Windows Paths
+    $retFilePathAndTimestamp = [PSCustomObject]@{
+        FilePath  = $null
+        Timestamp = $null
+    }
+
+    # after much experimentation, it seems that each backslash in the regex needs to be escaped with another backslash
+    $filePathEscaped = $filePath -replace "\\", "\\\\"
+
     $resource = "https://api.loganalytics.io"
-    $kql = "$table | where Computer == '$computer' | where FilePath == @'$filePath' | summarize EarliestTimestamp=min($timestampColumn)"
-    $payload = @{
-        query = $kql
-        timespan = $timeSpan
-    } | ConvertTo-Json
+
+    # this KQL statement will return two columns: FilePath and EarliestTimestamp
+    $kql = "$table | where Computer == '$computer' | where FilePath matches regex @'$filePathEscaped' | summarize EarliestTimestamp=min($timestampColumn) by FilePath"
+   
+    $payload = "{ `"query`": `"$kql`", `"timespan`": `"$timeSpan`" }"
 
     if ($isArcConnectedMachine -ieq "true") {
         $accessToken = Get-AccessTokenArc -Resource $resource
@@ -44,23 +62,50 @@ function Get-EarliestTimestamp {
         "Content-Type" = "application/json"
     }
 
-    $response = Invoke-RestMethod -Method Post -Uri "$resource/v1/workspaces/$workspaceId/query" -Headers $headers -Body $payload
+    # this forces the resonse to predictably be an array
+    $response = ,@(Invoke-RestMethod -Method Post -Uri "$resource/v1/workspaces/$workspaceId/query" -Headers $headers -Body $payload)
 
-    if ([string]::IsNullOrEmpty($response.tables.rows)) {
-        $timestamp = $null
+    if ($null -eq $response) {
+        logMessage "No response from KQL query."
+        return $null
+    }
+    elseif ($null -eq $response.tables) {
+        logMessage "No tables in KQL response."
+        return $null
+    }
+    elseif ($null -eq $response.tables.rows) {
+        logMessage "No rows in KQL response."
+        return $null
+    }
+    elseif ($response.tables.rows.Count -eq 0) {
+        logMessage "No data rows in KQL response."
+        return $null
+    }
+    elseif ([string]::IsNullOrEmpty($response.tables.rows[0][0])) {
+        logMessage "No value in KQL response."
+        return $null
+    }
+    # if the value is DateTime, convert to String
+    elseif ($response.tables.rows[0][1] -is [DateTime]) {
+        $filePath = $response.tables.rows[0][0]
+        $timestamp = $response.tables.rows[0][1].ToString("o")
     }
     else {
-        $timestamp = $response.tables.rows[0][0]
+        $filePath = $response.tables.rows[0][0]
+        $timestamp = $response.tables.rows[0][1]
     }
 
-    Write-Host "Access Token (trunc): $($accessToken.Substring(0,10))..."
-    Write-Host "KQL Query: $kql"
-    Write-Host "Payload: $payload"
-    Write-Host "KQL Result: $($response | ConvertTo-Json)"
-    Write-Host "Earliest timestamp for $filePath on $computer"
-    Write-Host "Timestamp: $timestamp"
+    logMessage "Access Token (trunc): $($accessToken.Substring(0,10))..."
+    logMessage "KQL Query: $kql"
+    logMessage "Payload: $payload"
+    logMessage "KQL Result: $($response | ConvertTo-Json)"
+    logMessage "Earliest timestamp for $filePath on $computer"
+    logMessage "Timestamp: $timestamp $($timestamp.GetType())"
 
-    return $timestamp
+    $retFilePathAndTimestamp.FilePath  = $filePath
+    $retFilePathAndTimestamp.Timestamp = $timestamp
+
+    return $retFilePathAndTimestamp
 }
 
 # Note that the Log Ingestion API does NOT call TransformKql from the Data Collection Rule
@@ -136,9 +181,9 @@ function Get-AccessTokenArc {
     # Step 1: Make unauthenticated request to get WWW-Authenticate header
     try { (Invoke-WebRequest -Uri $ENDPOINT -Headers @{Metadata='true'} -UseBasicParsing -ErrorAction Stop).Headers['WWW-Authenticate'] } catch { $WWW_AUTH_HEADER = $_.Exception.Response.Headers.GetValues("WWW-Authenticate")}
 
-    Write-Host "Endpoint $ENDPOINT"
-    Write-Host "WWW $WWW_AUTH_HEADER"
-    Write-Host "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
+    logMessage "Endpoint $ENDPOINT"
+    logMessage "WWW $WWW_AUTH_HEADER"
+    logMessage "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
 
     # Step 2: Extract secret file path from header
     $SECRET_FILE = ( $WWW_AUTH_HEADER -split 'Basic realm=')[1] -replace "`r$",""
@@ -169,8 +214,8 @@ function Get-AccessTokenAzure {
     $IDENTITY_ENDPOINT = "http://$imdsHost/metadata/identity/oauth2/token"
     $ENDPOINT = "${IDENTITY_ENDPOINT}?resource=${Resource}&api-version=${API_VERSION}"
 
-    Write-Host "Endpoint $ENDPOINT"
-    Write-Host "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
+    logMessage "Endpoint $ENDPOINT"
+    logMessage "whoami $([Security.Principal.WindowsIdentity]::GetCurrent().Groups)"
 
     $RESPONSE = Invoke-WebRequest -Method Get -Uri $ENDPOINT -Headers @{Metadata='True'} -UseBasicParsing
 
@@ -191,6 +236,10 @@ function IngestJson {
         [string]$isArcConnectedMachine
     )
 
+    logMessage "Ingesting JSON file $jsonLogFile to table $tableName using DCR $dcrImmutableId"
+
+    logMessage "Log file content: $(Get-Content $jsonLogFile)"
+
     $resource = "https://monitor.azure.com"
     if ($isArcConnectedMachine -eq "true") {
         $token = Get-AccessTokenArc -Resource $resource
@@ -201,7 +250,7 @@ function IngestJson {
     $streamName = "Custom-Text-$tableName"
     $uri = "$endpointUri/dataCollectionRules/$dcrImmutableId/streams/${streamName}?api-version=2023-01-01"
 
-    Write-Host "IngestJson $dcrImmutableId $tableName $uri $jsonLogFile $isArcConnectedMachine $($token.Substring(0,10))"
+    logMessage "IngestJson $dcrImmutableId $tableName $uri $jsonLogFile $isArcConnectedMachine $($token.Substring(0,10))"
     
     Invoke-RestMethod -Method Post -Uri $uri -Headers @{
         "Content-Type" = "application/json"
@@ -214,32 +263,40 @@ $scriptName = $MyInvocation.MyCommand.Name
 
 $attempts = 0
 
-Write-Host "Script $scriptName started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan, sleepTime=$sleepTime, maxRetries=$maxRetries"
+logMessage "Script $scriptName started. Params: workspaceId=$workspaceId, computerName=$computerName, sourceLogFile=$sourceLogFile, targetTable=$targetTable, dcrImmutableId=$dcrImmutableId, endpointUri=$endpointUri, timestampColumn=$timestampColumn, timeSpan=$timeSpan, sleepTime=$sleepTime, maxRetries=$maxRetries"
 
 while ($true) {
-    Write-Host "Attempt #$($attempts + 1) to get earliest timestamp..."
-    $timestamp = Get-EarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $isArcConnectedMachine
-    $isoTimestampStr = $timestamp.ToString("o")
-    if ($timestamp) {
-        Write-Host "Got result: $isoTimestampStr"
+    logMessage "Attempt #$($attempts + 1) to get earliest timestamp..."
+
+    $customObject = Get-EarliestTimestamp $workspaceId $targetTable $computerName $sourceLogFile $timestampColumn $timeSpan $isArcConnectedMachine
+
+    # null means something went wrong
+    if ($null -eq $customObject) {
+        logMessage "No timestamp returned."
+        exit 1
+    }
+    elseif (-not [string]::IsNullOrEmpty($customObject.Timestamp)) {
+        logMessage "Got result: $($customObject.Timestamp)"
         break
-    } else {
-        Write-Host "Result was empty, retrying in $sleepTime seconds..."
+    }
+    # empty string means no logs yet 
+    else {
+        logMessage "Result was empty, retrying in $sleepTime seconds..."
         Start-Sleep -Seconds $sleepTime
         $attempts++
         if ($attempts -ge $maxRetries) {
-            Write-Host "Failed to get result after $maxRetries attempts, exiting with error."
+            logMessage "Failed to get result after $maxRetries attempts, exiting with error."
             exit 1
         }
     }
 }
 
 # Convert logs to JSON format and return array of generated files
-$jsonFileArr = Log2Json $sourceLogFile $targetTable $isoTimestampStr $computerName
+$jsonFileArr = Log2Json $customObject.FilePath $targetTable $customObject.Timestamp $computerName
 
 # For each JSON file, ingest logs into Log Analytics Workspace table
-Write-Host "Ingesting logs into Log Analytics Workspace table..."
+logMessage "Ingesting logs into Log Analytics Workspace table..."
 foreach ($jsonLogFile in $jsonFileArr) {
-    Write-Host "Ingesting file: $jsonLogFile"
+    logMessage "Ingesting file: $jsonLogFile"
     IngestJson $dcrImmutableId $targetTable $endpointUri $jsonLogFile $isArcConnectedMachine
 }
