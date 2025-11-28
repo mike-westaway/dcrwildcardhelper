@@ -614,11 +614,11 @@ echo "Part II Download script"
 `$MAX_RETRIES = "$maxRetries"
 `$LOG_BLOB_NAME = (`$BLOB_NAME -replace '\.ps1$', '') + '.log'
 `$BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${BLOB_NAME}"
-Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -OutFile `$LOCAL_FILE
-& "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" -sleepTime "`$SLEEP_TIME" -maxRetries "`$MAX_RETRIES" > "`$LOG_BLOB_NAME"
+Invoke-WebRequest -Uri `$BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02" } -UseBasicParsing -OutFile `$LOCAL_FILE
+& "./`$LOCAL_FILE" -workspaceId "`$WORKSPACE_ID" -computerName "`$COMPUTER_NAME" -sourceLogFile "`$SOURCE_LOG_FILE" -targetTable "`$TARGET_TABLE" -dcrImmutableId "`$DCR_IMMUTABLE_ID" -endpointUri "`$ENDPOINT_URI" -timestampColumn "`$TIMESTAMP_COLUMN" -timeSpan "`$TIME_SPAN" -isArcConnectedMachine "`$IS_ARC_CONNECTED_MACHINE" -sleepTime "`$SLEEP_TIME" -maxRetries "`$MAX_RETRIES"
 echo "Part III Upload log file"
 `$LOG_BLOB_URL = "https://`${STORAGE_ACCOUNT}.blob.core.windows.net/`${CONTAINER_NAME}/`${LOG_BLOB_NAME}"
-Invoke-WebRequest -Uri `$LOG_BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02"; "x-ms-blob-type" = "BlockBlob" } -Method Put -InFile "`$LOG_BLOB_NAME"
+Invoke-WebRequest -Uri `$LOG_BLOB_URL -Headers @{ "Authorization" = "Bearer `$ACCESS_TOKEN"; "x-ms-version" = "2020-10-02"; "x-ms-blob-type" = "BlockBlob" } -Method Put -InFile "`$LOG_BLOB_NAME" -UseBasicParsing
 "@
 
     return $script
@@ -810,10 +810,14 @@ function RunCommandAsyncToIngestMissingLogs {
     # http://localhost:40342/metadata/identity/oauth2/token?api-version=2020-06-01&resource=<resource>
     # on Azure linux curl -s -H "Metadata: true" "$ENDPOINT" returns JSON with access_token
 
+    # the KQL pattern matching for FilePath uses RegEx 
+    # so convert the glob style pattern to RegEx
+    $regexPattern = $LogFilePath -replace '\*', '.*' -replace '\?', '.'
+
     $script = Get-IngestScript `
         -isArcConnectedMachine $isArcConnectedMachine `
         -scriptStorageAccount $scriptStorageAccount `
-        -LogFilePath $LogFilePath `
+        -LogFilePath $regexPattern `
         -tableName $tableName `
         -dcrImmutableId $dcrImmutableId `
         -dceEndpointId $dceEndpointId `
